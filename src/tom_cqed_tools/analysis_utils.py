@@ -1314,6 +1314,8 @@ def analyze_spectroscopy(
                 "bs_amp": bs_amp,
                 "bs_flat_len": bs_flat_len,
                 "fit_result": result,
+                "x_raw": freq,
+                "y_raw": y,
             }
         )
 
@@ -1682,6 +1684,8 @@ def analyze_rabi(
                 "fidelity": bs_fidelity,
                 "fidelity_err": bs_fidelity_err,
                 "fit_result": result,
+                "x_raw": time,
+                "y_raw": y,
             }
         )
 
@@ -2035,6 +2039,8 @@ def analyze_bangbang(
                     "bs_pi_time_flat": bs_pi_time_flat,
                     "bs_ramp_len": bs_ramp_len,
                     "fit_result": result,  # The raw lmfit object for debugging
+                    "x_raw": n_env,
+                    "y_raw": y_env,
                 }
             )
         
@@ -2311,6 +2317,209 @@ def analyze_t1(
         fig.delaxes(axs[idx])
 
     fig.suptitle(f"T1 {alice_or_bob.capitalize()}", y=1.02, fontsize=32)
+    plt.tight_layout()
+
+    return pd.DataFrame(results), fig
+
+# =============================================================================
+# Ramsey / Echo Plotter
+# =============================================================================
+def ramsey_decay_func(t, A, T2, f, phi, B):
+    return A * np.exp(-t / T2) * np.cos(2 * np.pi * f * t + phi) + B
+
+def fit_ramsey(t, y, is_echo=False, custom_settings=None):
+    model = Model(ramsey_decay_func)
+    params = model.make_params()
+    
+    rough_A = (np.max(y) - np.min(y)) / 2.0
+    if len(y) > 0 and y[0] < np.mean(y):
+        rough_A = -rough_A
+    rough_B = np.mean(y)
+    rough_T2 = np.mean(t) if len(t) > 0 else 1.0
+    
+    params["A"].set(value=rough_A, min=-2.0, max=2.0)
+    params["T2"].set(value=rough_T2, min=0.001, max=1000)
+    params["B"].set(value=rough_B, min=-1.0, max=1.0)
+    
+    # guess f from FFT or just set a standard bound
+    n = len(t)
+    if n > 3:
+        dt = t[1] - t[0] if n > 1 else 1.0
+        freqs = np.fft.rfftfreq(n, d=dt)
+        fft_vals = np.abs(np.fft.rfft(y - np.mean(y)))
+        guess_f = freqs[np.argmax(fft_vals)]
+        if guess_f == 0:
+            guess_f = 1 / (t[-1] - t[0])
+    else:
+        guess_f = 0.1
+    params["f"].set(value=guess_f, min=0.0)
+    params["phi"].set(value=0.0, min=-np.pi, max=np.pi)
+
+    if custom_settings:
+        for param_name, settings in custom_settings.items():
+            params[param_name].set(**settings)
+
+    return model.fit(y, params, t=t)
+
+def analyze_ramsey(
+    filenums,
+    modes,
+    data_path,
+    alice_or_bob="alice",
+    suffix_template=None,
+    global_overrides=None,
+    fit_overrides=None,
+    is_echo=False,
+):
+    if fit_overrides is None:
+        fit_overrides = {}
+
+    tasks = list(zip(filenums, modes))
+    n = len(tasks)
+    ncols = int(np.ceil(np.sqrt(n)))
+    nrows = int(np.ceil(n / ncols)) if ncols > 0 else 1
+    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    axs = axs.flatten()
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n // 5 + 1)
+
+    results = []
+
+    for ii, (filenum, mode) in enumerate(tasks):
+        ax, c = axs[ii], colors[ii]
+
+        if suffix_template is None:
+            seq_str = "echo" if is_echo else "ramsey"
+            suffix = f"bs_{alice_or_bob[0]}{mode}_{seq_str}"
+        else:
+            suffix = suffix_template.format(alice_or_bob=alice_or_bob, mode=mode)
+
+        try:
+            data = LabData(data_path, filenum=filenum, suffix=suffix)
+        except FileNotFoundError:
+            ax.text(
+                0.5,
+                0.5,
+                f"File {filenum}\nMode {mode}\nNot Found",
+                ha="center",
+                va="center",
+            )
+            ax.axis("off")
+            continue
+
+        time = data.xpts * 1e6
+        y = data.P_e
+
+        current = data.exp.get("flux_current", 0)
+        flux = data.q0.get("flux", 0.0)
+
+        current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
+        specific_overrides = fit_overrides.get((filenum, mode), {})
+
+        for param_name, settings in specific_overrides.items():
+            if param_name in current_settings:
+                current_settings[param_name].update(settings)
+            else:
+                current_settings[param_name] = settings
+
+        result = fit_ramsey(time, y, is_echo=is_echo, custom_settings=current_settings)
+        
+        t2_val = result.params["T2"].value
+        t2_err = result.params["T2"].stderr or 0.0
+        
+        f_val = result.params["f"].value
+        f_err = result.params["f"].stderr or 0.0
+
+        results.append(
+            {
+                "filenum": filenum,
+                "mode": mode,
+                "current": current,
+                "flux": flux,
+                "t2": t2_val,
+                "t2_err": t2_err,
+                "f": f_val,
+                "f_err": f_err,
+                "fit_result": result,
+                "x_raw": time,
+                "y_raw": y,
+            }
+        )
+
+        fcolor = to_rgba(c, alpha=0.25)
+        ax.plot(
+            time,
+            y,
+            marker="o",
+            linestyle="",
+            color=c,
+            markerfacecolor=fcolor,
+            markeredgecolor=c,
+            ms=8,
+            label="Data",
+        )
+
+        time_fine = np.linspace(time.min(), time.max(), 1000)
+        fit_fine = result.eval(t=time_fine)
+
+        try:
+            model_error = result.eval_uncertainty(t=time_fine, sigma=1)
+            residual_noise = np.std(result.residual)
+            prediction_error = np.sqrt(model_error**2 + residual_noise**2)
+            ax.fill_between(
+                time_fine,
+                fit_fine - prediction_error,
+                fit_fine + prediction_error,
+                color=c,
+                alpha=0.15,
+                edgecolor="none",
+                label="Prediction Band",
+            )
+        except Exception:
+            pass
+
+        label_str = rf"$T_2^* = {format_err(t2_val, t2_err)}\ \mu s$" if not is_echo else rf"$T_{{2,E}} = {format_err(t2_val, t2_err)}\ \mu s$"
+        if not is_echo:
+            label_str += "\n" + rf"$f = {format_err(f_val, f_err)}$ MHz"
+            
+        ax.plot(
+            time_fine, 
+            fit_fine, 
+            c=c, 
+            linestyle="-", 
+            label=label_str
+        )
+
+        ax.axvline(t2_val, linestyle="--", color=c)
+
+        info_text = (
+            f"Current = {current * 1e3:.3f} mA\n"
+            rf"Flux = {flux:.3f} $\Phi_0$"
+        )
+
+        props = dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="lightgray", linewidth=1)
+        ax.text(
+            0.95,
+            0.95,
+            info_text,
+            transform=ax.transAxes,
+            fontsize="x-small",
+            verticalalignment="top",
+            horizontalalignment="right",
+            bbox=props,
+        )
+
+        ax.set(xlabel=r"t ($\mu s$)", ylabel="$P_e$")
+        ax.set_xlim(-time.max() * 0.1, time.max() * 1.1)
+        
+        axtitle = (f"Storage {mode}" if mode != 0 else "SNAIL") + f", file {filenum}"
+        ax.legend(fontsize="small", title=axtitle, loc="upper right")
+
+    for idx in range(len(tasks), len(axs)):
+        fig.delaxes(axs[idx])
+
+    title_prefix = "Echo" if is_echo else "Ramsey"
+    fig.suptitle(f"{title_prefix} {alice_or_bob.capitalize()}", y=1.02, fontsize=32)
     plt.tight_layout()
 
     return pd.DataFrame(results), fig
