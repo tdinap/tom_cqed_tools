@@ -1446,7 +1446,7 @@ def format_err(val, err):
 # =============================================================================
 # 2. THE FIT WRAPPER
 # =============================================================================
-def fit_rabi(t, y, pi_guess, custom_settings=None):
+def fit_rabi(t, y, pi_guess, custom_settings=None, yerr=None):
     model = Model(bs_decay_func)
     params = model.make_params()
 
@@ -1464,9 +1464,10 @@ def fit_rabi(t, y, pi_guess, custom_settings=None):
         for param_name, settings in custom_settings.items():
             params[param_name].set(**settings)
 
-    return model.fit(y, params, t=t)
+    weights = 1 / yerr if yerr is not None else None
+    return model.fit(y, params, t=t, weights=weights)
 
-def fit_rabi_with_phase(t, y, pi_guess, custom_settings=None):
+def fit_rabi_with_phase(t, y, pi_guess, custom_settings=None, yerr=None):
     model = Model(bs_decay_func_with_phase)
     params = model.make_params()
 
@@ -1485,7 +1486,8 @@ def fit_rabi_with_phase(t, y, pi_guess, custom_settings=None):
         for param_name, settings in custom_settings.items():
             params[param_name].set(**settings)
 
-    return model.fit(y, params, t=t)
+    weights = 1 / yerr if yerr is not None else None
+    return model.fit(y, params, t=t, weights=weights)
 
 def fit_rabi_heated(t, y, pi_guess, custom_settings=None):
     model = Model(bs_decay_heating_func)
@@ -1507,7 +1509,8 @@ def fit_rabi_heated(t, y, pi_guess, custom_settings=None):
         for param_name, settings in custom_settings.items():
             params[param_name].set(**settings)
 
-    return model.fit(y, params, t=t)
+    weights = 1 / yerr if yerr is not None else None
+    return model.fit(y, params, t=t, weights=weights)
 
 
 
