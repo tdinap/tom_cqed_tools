@@ -2175,7 +2175,7 @@ def analyze_t1(
     modes,
     data_path,
     alice_or_bob="alice",
-    suffix_template=None,
+    suffix=None,
     global_overrides=None,
     fit_overrides=None,
 ):
@@ -2196,13 +2196,15 @@ def analyze_t1(
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
 
-        if suffix_template is None:
-            suffix = f"bs_{alice_or_bob[0]}{mode}_t1"
+        if suffix is None:
+            current_suffix = f"bs_{alice_or_bob[0]}{mode}_t1"
+        elif "{" in str(suffix):
+            current_suffix = str(suffix).format(alice_or_bob=alice_or_bob, mode=mode, a_or_b=alice_or_bob[0])
         else:
-            suffix = suffix_template.format(alice_or_bob=alice_or_bob, mode=mode)
+            current_suffix = str(suffix)
 
         try:
-            data = LabData(data_path, filenum=filenum, suffix=suffix)
+            data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
             ax.text(
                 0.5,
@@ -2366,7 +2368,7 @@ def analyze_ramsey(
     modes,
     data_path,
     alice_or_bob="alice",
-    suffix_template=None,
+    suffix=None,
     global_overrides=None,
     fit_overrides=None,
     is_echo=False,
@@ -2388,14 +2390,16 @@ def analyze_ramsey(
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
 
-        if suffix_template is None:
+        if suffix is None:
             seq_str = "echo" if is_echo else "ramsey"
-            suffix = f"bs_{alice_or_bob[0]}{mode}_{seq_str}"
+            current_suffix = f"bs_{alice_or_bob[0]}{mode}_{seq_str}"
+        elif "{" in str(suffix):
+            current_suffix = str(suffix).format(alice_or_bob=alice_or_bob, mode=mode, a_or_b=alice_or_bob[0])
         else:
-            suffix = suffix_template.format(alice_or_bob=alice_or_bob, mode=mode)
+            current_suffix = str(suffix)
 
         try:
-            data = LabData(data_path, filenum=filenum, suffix=suffix)
+            data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
             ax.text(
                 0.5,
