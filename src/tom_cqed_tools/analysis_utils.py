@@ -2103,9 +2103,9 @@ def propagate(f, x, cov):
     n = jnp.shape(x)[0] if dims[1] >= 1 else 1
     m = jnp.shape(f_x)[0] if dims[0] >= 1 else 1
     if m < n:
-        jac = jit(jacrev(f))(x)
+        jac = jacrev(f)(x)
     else:
-        jac = jit(jacfwd(f))(x)
+        jac = jacfwd(f)(x)
 
     # single variable scalar function
     if dims == (0, 0, 0):
