@@ -2548,3 +2548,24 @@ def print_fit_result(result_list, multiplier, line_break=False):
             print(result)
     else:
         print(results)
+
+
+# =============================================================================
+# MATH HELPERS
+# =============================================================================
+def temperature_q(nu, rat):
+    Kb = 1.38e-23
+    h = 2 * np.pi * 1.054e-34
+    return h * nu / (Kb * np.log(1 / rat))
+
+def occupation_r(nu, T):
+    Kb = 1.38e-23
+    h = 2 * np.pi * 1.054e-34
+    return 1 / (np.exp(h * nu / (Kb * T)) - 1)
+
+def nth_from_contrast(contrasts):
+    ratio = contrasts[1] / contrasts[0]
+    return 1 / (ratio - 1)
+
+def dbm_to_watts(dbm):
+    return 10 ** ((dbm - 30) / 10)
