@@ -2414,7 +2414,11 @@ def analyze_ramsey(
             ax.axis("off")
             continue
 
-        time = data.xpts * 1e6
+        time = data.xpts
+        if time.ndim > 1:
+            time = time[0]
+        time = time * 1e6
+        
         y = data.P_e
 
         current = data.exp.get("flux_current", 0)
