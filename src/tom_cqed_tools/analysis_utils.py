@@ -2401,12 +2401,15 @@ def analyze_ramsey(
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
+            expected_file = f"{str(filenum).zfill(5)}_{current_suffix}.h5" if current_suffix else f"{str(filenum).zfill(5)}.h5"
             ax.text(
                 0.5,
                 0.5,
-                f"File {filenum}\nMode {mode}\nNot Found",
+                f"File {filenum}\nMode {mode}\nNot Found\n(Expected: {expected_file})",
                 ha="center",
                 va="center",
+                fontsize=8,
+                color="red"
             )
             ax.axis("off")
             continue
