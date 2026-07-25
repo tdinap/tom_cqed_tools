@@ -1489,7 +1489,7 @@ def fit_rabi_with_phase(t, y, pi_guess, custom_settings=None, yerr=None):
     weights = 1 / yerr if yerr is not None else None
     return model.fit(y, params, t=t, weights=weights)
 
-def fit_rabi_heated(t, y, pi_guess, custom_settings=None):
+def fit_rabi_heated(t, y, pi_guess, custom_settings=None,yerr=None):
     model = Model(bs_decay_heating_func)
     params = model.make_params()
 
@@ -1532,6 +1532,7 @@ def analyze_rabi(
     plotfits=True,
     plotfills=True,
     plotlines=True,
+    yerr=None
 ):
     if fit_overrides is None:
         fit_overrides = {}
@@ -1682,7 +1683,9 @@ def analyze_rabi(
                 "bs_freq": bs_freq,
                 "bs_amp": bs_amp,
                 "t1": bs_t1,
+                "t1_err": t1_err,
                 "t2": bs_t2,
+                "t2_err": t2_err,
                 "pi_time": pi_time,
                 "fidelity": bs_fidelity,
                 "fidelity_err": bs_fidelity_err,
@@ -2139,6 +2142,15 @@ def propagate(f, x, cov):
         raise ValueError(f"Unsupported input dimensions: {dims}")
 
     return f_x, cov_f
+
+def diag_square(x):
+    x2 = np.square(x)
+
+    if np.ndim(x2) <= 1:
+        return np.diag(x2)
+
+    n = x2.shape[0]
+    return np.einsum("ji,jk->ijk", x2, np.eye(n))
 
 
 # T1 plotter
