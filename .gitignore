@@ -39,3 +39,7 @@ venv.bak/
 # IDEs
 .vscode/
 .idea/
+
+# Generated PDF figures
+*.pdf
+
