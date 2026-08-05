@@ -3,6 +3,7 @@
 import copy
 import json
 import re
+import os
 
 import h5py
 import jax.numpy as jnp
@@ -18,8 +19,10 @@ from lmfit import Model
 from lmfit.models import LinearModel, LorentzianModel
 from matplotlib.colors import to_rgba
 from scipy import optimize
-from scipy.constants import e, h
-from slab import *
+from scipy.constants import e, h, k
+
+# from slab import *
+from slab import fitlor
 from tabulate import tabulate
 
 import ipynbname
@@ -150,6 +153,7 @@ def get_coupling_mag_fit(freq, real, imag, display=True):
     Qc = Qi / kappa
 
     print("d: %s" % d)
+    print("f0: %s" % fs)
     print("Q_i/Q_c: %s" % kappa)
     print("Loaded Q: %s" % Qs)
     print("Internal Q: %s" % Qi)
@@ -192,7 +196,7 @@ def get_coupling(
         "Qi": coupling_complex_fit_pre[2],
         "phi": coupling_complex_fit_pre[3],
         "scale": coupling_complex_fit_pre[4],
-        "phi_global": coupling_complex_fit_pre[0],
+        "phi_global": coupling_complex_fit_pre[5],
     }
 
     return coupling_mag_fit, coupling_complex_fit
@@ -381,12 +385,12 @@ def print_fitresult(xdata, ydata, bestfitparams, fitparam_errors, fitparam_names
     # Remember the limits of the y-axis so that we don't change it
     ylims = plt.ylim()
 
-    for k in range(len(bestfitparams)):
+    for idx_k in range(len(bestfitparams)):
         plt.plot(
-            xdata[k],
-            ydata[k],
+            xdata[idx_k],
+            ydata[idx_k],
             label=r"%s = %.3e $\pm$ %.1e"
-            % (fitparam_names[k], bestfitparams[k], fitparam_errors[k]),
+            % (fitparam_names[idx_k], bestfitparams[idx_k], fitparam_errors[idx_k]),
             alpha=0,
         )
 
@@ -566,12 +570,15 @@ def fitbetter(
 
     try:
         fitparam_errors = np.sqrt(np.diag(covmatrix))
-    except:
+    except Exception as e:  # Fix 1: Catch only standard exceptions
+        print(f"Exception: {e}")
         print(covmatrix)
         print(
-            "Error encountered in calculating errors on fit parameters.\
-            This may result from a very flat parameter space"
+            "Error encountered in calculating errors on fit parameters. "
+            "This may result from a very flat parameter space."
         )
+        # Fix 2: Define fitparam_errors so the return statement doesn't crash
+        fitparam_errors = np.full_like(bestfitparams, np.nan)
 
     if showfit:
         if showdata:
@@ -714,12 +721,12 @@ def fit_resonator_complex(
         fig, ax = plt.subplots(1, 3, figsize=(9, 3))
         ax[0].plot(fitdatax, np.real(fitdatay), "o", ms=2, label="data")
         ax[1].plot(fitdatax, np.imag(fitdatay), "o", ms=2, label="data")
-        ax[2].plot(fitdatax, np.angle(fitdatay) * 180 / pi, "o", ms=2, label="data")
+        ax[2].plot(fitdatax, np.angle(fitdatay) * 180 / np.pi, "o", ms=2, label="data")
     if showstartfit:
         data = fitfunc(fitdatax, guess_params)
         ax[0].plot(fitdatax, np.real(data), label="startfit")
         ax[1].plot(fitdatax, np.imag(data), label="startfit")
-        ax[2].plot(fitdatax, np.angle(data) * 180 / pi, label="startfit")
+        ax[2].plot(fitdatax, np.angle(data) * 180 / np.pi, label="startfit")
     data = fitfunc(fitdatax, params)
     ax[0].plot(fitdatax, np.real(data), "r-", label="fit", lw=2, alpha=0.8)
     ax[0].set_xlabel("Freq.")
@@ -727,7 +734,9 @@ def fit_resonator_complex(
     ax[1].plot(fitdatax, np.imag(data), "r-", label="fit", lw=2, alpha=0.8)
     ax[1].set_xlabel("Freq.")
     ax[1].set_title("Im")
-    ax[2].plot(fitdatax, np.angle(data) * 180 / pi, "r-", label="fit", lw=2, alpha=0.8)
+    ax[2].plot(
+        fitdatax, np.angle(data) * 180 / np.pi, "r-", label="fit", lw=2, alpha=0.8
+    )
     ax[2].set_xlabel("Freq.")
     ax[2].set_title("Phase (deg)")
     fig.suptitle("Mode Freq: " + str("{:.6e}".format(params[0])))
@@ -754,21 +763,6 @@ def nbar_from_power(P, nu_c, nu_d, Qc, Q_in):
 
 def T1(freq, Qi):
     return Qi / (2 * np.pi * freq)
-
-
-def nbar_from_power(P, nu_c, nu_d, Qc, Q_in):
-    nu_d = nu_d * 1e9
-    nu_c = nu_c * 1e9
-    w_c = 2 * np.pi * nu_c
-    w_d = 2 * np.pi * nu_d
-    Q_tot = 1 / (1 / Qc + 1 / Q_in)
-    kappa_in = w_c / Qc
-    kappa = w_c / Q_tot
-    photon_flux = P / (const.h * nu_d)
-    n = (
-        kappa_in / (kappa**2 / 4 + (w_d - w_c) ** 2) * (photon_flux)
-    )  # RWA has been used
-    return n
 
 
 def nbar_S11(P, Qi, Qc, nu):
@@ -819,13 +813,13 @@ def g_from_chi(chi, Ec, nuq, nur):
 
 
 def purcell_T1(g, fr, fq, qr):
-    kappa_r = 2 * pi * fr / qr
+    kappa_r = 2 * np.pi * fr / qr
     kappa_q = (g**2 / (fr - fq) ** 2) * kappa_r
     return 1 / kappa_q
 
 
 def purcell_T1_inv(g, fr, fq, qr):
-    kappa_r = 2 * pi * fr / qr
+    kappa_r = 2 * np.pi * fr / qr
     T1q = 1 / ((g**2 / (fr - fq) ** 2) / kappa_r)
     return T1q
 
@@ -843,13 +837,13 @@ def purcell_Qi(g, fr, fq, qr):
     Returns:
     float: Purcell limited internal quality factor Qi.
     """
-    kappa_r = 2 * pi * fr / qr
+    kappa_r = 2 * np.pi * fr / qr
     kappa_q = (g**2 / (fr - fq) ** 2) * kappa_r
     return fr / kappa_q
 
 
 def Ej_from_Lj(Lj):
-    return (Phi0 / (2 * pi)) ** 2 / Lj
+    return (Phi0 / (2 * np.pi)) ** 2 / Lj
 
 
 def add_complex_fit(fitdict, modenum, phase_fit):
@@ -914,6 +908,7 @@ def lorfuncsum(p, x, N=2):
 def fitlorsum(
     xdata,
     ydata,
+    N=1,
     fitparams=None,
     domain=None,
     showfit=False,
@@ -921,32 +916,37 @@ def fitlorsum(
     label="",
     debug=False,
 ):
-    """fit lorentzian:
-    returns [offset,amplitude,center,hwhm]"""
+    """fit lorentzian sum:
+    returns [amp1, center1, hwhm1, ..., offset]"""
     if domain is not None:
         fitdatax, fitdatay = selectdomain(xdata, ydata, domain)
     else:
         fitdatax = xdata
         fitdatay = ydata
+
     if fitparams is None:
-        fitparams = 0 * np.ones(3 * N + 1)
-        fitparams[0] = (fitdatay[0] + fitdatay[-1]) / 2.0
-        fitparams[1] = max(fitdatay) - min(fitdatay)
-        fitparams[2] = fitdatax[np.argmax(fitdatay)]
-        fitparams[3] = (max(fitdatax) - min(fitdatax)) / 10.0
-    if debug == True:
+        fitparams = np.zeros(3 * N + 1)
+        # Correct mapping for lorfuncsum: [amp, center, hwhm, ..., offset]
+        fitparams[0] = max(fitdatay) - min(fitdatay)  # Peak 1 Amp
+        fitparams[1] = fitdatax[np.argmax(fitdatay)]  # Peak 1 Center
+        fitparams[2] = (max(fitdatax) - min(fitdatax)) / 10.0  # Peak 1 HWHM
+        fitparams[3 * N] = (fitdatay[0] + fitdatay[-1]) / 2.0  # Offset at end
+
+    if debug:
         print(fitparams)
+
     p1 = dsf.fitgeneral(
         fitdatax,
         fitdatay,
-        lorfuncsum,
+        lambda p, x: lorfuncsum(p, x, N=N),
         fitparams,
         domain=None,
         showfit=showfit,
         showstartfit=showstartfit,
         label=label,
     )
-    p1[3] = abs(p1[3])
+    # Correctly abs the first peak's HWHM (index 2)
+    p1[2] = abs(p1[2])
     return p1
 
 
@@ -1904,7 +1904,7 @@ def analyze_bangbang(
     xs_odd = []
     ys_even = []
     ys_odd = []
-    ys = []
+
     bs_amps = []
     bs_freqs = []
 
@@ -2645,64 +2645,67 @@ def nth_from_contrast(contrasts):
     return 1 / (ratio - 1)
 
 
-def dbm_to_watts(dbm):
-    return 10 ** ((dbm - 30) / 10)
-
-
 # =============================================================================
 # adding context to saved figures
 # =============================================================================
+
 
 def get_physical_cell(nb_path):
     """Deterministically finds the cell number using Jupyter's hidden cell IDs."""
     ipy = get_ipython()
     if not ipy or not nb_path:
         return "Unknown_Cell"
-        
+
     try:
         # 1. Intercept the hidden metadata from the frontend's execution request
         # This contains the unique ID of the cell that triggered this code
         parent_request = ipy.kernel.get_parent()
-        cell_id = parent_request.get('metadata', {}).get('cellId')
-        
+        cell_id = parent_request.get("metadata", {}).get("cellId")
+
         # 2. Open the .ipynb file from the hard drive
-        with open(nb_path, 'r', encoding='utf-8') as f:
+        with open(nb_path, "r", encoding="utf-8") as f:
             nb_data = json.load(f)
-            
+
         cell_num = 1
         matching_cells = []
-        
+
         # 3. Look for the exact ID match
-        for cell in nb_data.get('cells', []):
+        for cell in nb_data.get("cells", []):
             # Jupyter v4.5+ standard stores it in cell['id']
             # Some older/custom frontends nest it in cell['metadata']['id']
-            current_id = cell.get('id') or cell.get('metadata', {}).get('id')
-            
+            current_id = cell.get("id") or cell.get("metadata", {}).get("id")
+
             if cell_id and current_id == cell_id:
                 return f"Cell {cell_num}"
-                
+
             # --- BRUTE FORCE FALLBACK ---
             # If the frontend didn't send an ID, fall back to our string matching
-            if not cell_id and cell.get('cell_type') == 'code':
+            if not cell_id and cell.get("cell_type") == "code":
                 exec_count = ipy.execution_count
                 current_code = ipy.history_manager.input_hist_raw[exec_count].strip()
-                source_code = "".join(cell.get('source', [])).strip()
-                
+                source_code = "".join(cell.get("source", [])).strip()
+
                 if current_code == source_code:
                     matching_cells.append(str(cell_num))
-                    
+
             cell_num += 1
 
         # Return fallback results if ID matching wasn't an option
         if not cell_id:
-            if not matching_cells: return "Unsaved_Cell_State"
-            if len(matching_cells) == 1: return f"Cell {matching_cells[0]}"
+            if not matching_cells:
+                return "Unsaved_Cell_State"
+            if len(matching_cells) == 1:
+                return f"Cell {matching_cells[0]}"
             return f"Cells [{', '.join(matching_cells)}]"
-            
+
         return "Cell_Not_Found"
-            
+
     except Exception as e:
+        print(
+            f"⚠️ Warning: Metadata extraction failed! Plot saved, but cell location is missing. Error: {repr(e)}"
+        )
         return "Parse_Error"
+
 
 def get_notebook_context(data_files=None):
     """Gathers context, including physical cell location."""
@@ -2710,9 +2713,9 @@ def get_notebook_context(data_files=None):
         nb_path = str(ipynbname.path())
     except Exception:
         nb_path = None
-        
+
     physical_loc = get_physical_cell(nb_path)
-    
+
     # Format the data files cleanly
     if data_files:
         if isinstance(data_files, str):
@@ -2720,9 +2723,10 @@ def get_notebook_context(data_files=None):
         files_str = f" | Data: {', '.join(data_files)}"
     else:
         files_str = ""
-        
+
     nb_name = Path(nb_path).name if nb_path else "Unknown_Notebook"
     return f"Notebook: {nb_name} | {physical_loc}{files_str}"
+
 
 def save_plot(fname, fig=None, data_files=None, **kwargs):
     """
@@ -2731,15 +2735,15 @@ def save_plot(fname, fig=None, data_files=None, **kwargs):
     """
     if fig is None:
         fig = plt.gcf()
-        
+
     context = get_notebook_context(data_files)
     ext = Path(fname).suffix.lower()
-    metadata = kwargs.pop('metadata', {})
-    
-    if ext == '.pdf':
-        metadata['Subject'] = context
-    elif ext in ['.png', '.svg']:
-        metadata['Description'] = context
-        
-    kwargs['metadata'] = metadata
+    metadata = kwargs.pop("metadata", {})
+
+    if ext == ".pdf":
+        metadata["Subject"] = context
+    elif ext in [".png", ".svg"]:
+        metadata["Description"] = context
+
+    kwargs["metadata"] = metadata
     fig.savefig(fname, **kwargs)
