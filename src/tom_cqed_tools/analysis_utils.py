@@ -1,9 +1,10 @@
 # tools for plotting and analyzing cavity resonators
 
 import copy
+import glob
 import json
 import re
-import os
+from datetime import datetime
 
 import h5py
 import jax.numpy as jnp
@@ -19,15 +20,9 @@ from lmfit import Model
 from lmfit.models import LinearModel, LorentzianModel
 from matplotlib.colors import to_rgba
 from scipy import optimize
-from scipy.constants import e, h, k
-
-# from slab import *
-from slab import fitlor
+from scipy.constants import e, h
+from slab import *
 from tabulate import tabulate
-
-import ipynbname
-from IPython import get_ipython
-from pathlib import Path
 
 # from scipy.optimize import curve_fit
 
@@ -153,7 +148,6 @@ def get_coupling_mag_fit(freq, real, imag, display=True):
     Qc = Qi / kappa
 
     print("d: %s" % d)
-    print("f0: %s" % fs)
     print("Q_i/Q_c: %s" % kappa)
     print("Loaded Q: %s" % Qs)
     print("Internal Q: %s" % Qi)
@@ -196,7 +190,7 @@ def get_coupling(
         "Qi": coupling_complex_fit_pre[2],
         "phi": coupling_complex_fit_pre[3],
         "scale": coupling_complex_fit_pre[4],
-        "phi_global": coupling_complex_fit_pre[5],
+        "phi_global": coupling_complex_fit_pre[0],
     }
 
     return coupling_mag_fit, coupling_complex_fit
@@ -385,12 +379,12 @@ def print_fitresult(xdata, ydata, bestfitparams, fitparam_errors, fitparam_names
     # Remember the limits of the y-axis so that we don't change it
     ylims = plt.ylim()
 
-    for idx_k in range(len(bestfitparams)):
+    for k in range(len(bestfitparams)):
         plt.plot(
-            xdata[idx_k],
-            ydata[idx_k],
+            xdata[k],
+            ydata[k],
             label=r"%s = %.3e $\pm$ %.1e"
-            % (fitparam_names[idx_k], bestfitparams[idx_k], fitparam_errors[idx_k]),
+            % (fitparam_names[k], bestfitparams[k], fitparam_errors[k]),
             alpha=0,
         )
 
@@ -570,15 +564,12 @@ def fitbetter(
 
     try:
         fitparam_errors = np.sqrt(np.diag(covmatrix))
-    except Exception as e:  # Fix 1: Catch only standard exceptions
-        print(f"Exception: {e}")
+    except:
         print(covmatrix)
         print(
-            "Error encountered in calculating errors on fit parameters. "
-            "This may result from a very flat parameter space."
+            "Error encountered in calculating errors on fit parameters.\
+            This may result from a very flat parameter space"
         )
-        # Fix 2: Define fitparam_errors so the return statement doesn't crash
-        fitparam_errors = np.full_like(bestfitparams, np.nan)
 
     if showfit:
         if showdata:
@@ -721,12 +712,12 @@ def fit_resonator_complex(
         fig, ax = plt.subplots(1, 3, figsize=(9, 3))
         ax[0].plot(fitdatax, np.real(fitdatay), "o", ms=2, label="data")
         ax[1].plot(fitdatax, np.imag(fitdatay), "o", ms=2, label="data")
-        ax[2].plot(fitdatax, np.angle(fitdatay) * 180 / np.pi, "o", ms=2, label="data")
+        ax[2].plot(fitdatax, np.angle(fitdatay) * 180 / pi, "o", ms=2, label="data")
     if showstartfit:
         data = fitfunc(fitdatax, guess_params)
         ax[0].plot(fitdatax, np.real(data), label="startfit")
         ax[1].plot(fitdatax, np.imag(data), label="startfit")
-        ax[2].plot(fitdatax, np.angle(data) * 180 / np.pi, label="startfit")
+        ax[2].plot(fitdatax, np.angle(data) * 180 / pi, label="startfit")
     data = fitfunc(fitdatax, params)
     ax[0].plot(fitdatax, np.real(data), "r-", label="fit", lw=2, alpha=0.8)
     ax[0].set_xlabel("Freq.")
@@ -734,9 +725,7 @@ def fit_resonator_complex(
     ax[1].plot(fitdatax, np.imag(data), "r-", label="fit", lw=2, alpha=0.8)
     ax[1].set_xlabel("Freq.")
     ax[1].set_title("Im")
-    ax[2].plot(
-        fitdatax, np.angle(data) * 180 / np.pi, "r-", label="fit", lw=2, alpha=0.8
-    )
+    ax[2].plot(fitdatax, np.angle(data) * 180 / pi, "r-", label="fit", lw=2, alpha=0.8)
     ax[2].set_xlabel("Freq.")
     ax[2].set_title("Phase (deg)")
     fig.suptitle("Mode Freq: " + str("{:.6e}".format(params[0])))
@@ -763,6 +752,21 @@ def nbar_from_power(P, nu_c, nu_d, Qc, Q_in):
 
 def T1(freq, Qi):
     return Qi / (2 * np.pi * freq)
+
+
+def nbar_from_power(P, nu_c, nu_d, Qc, Q_in):
+    nu_d = nu_d * 1e9
+    nu_c = nu_c * 1e9
+    w_c = 2 * np.pi * nu_c
+    w_d = 2 * np.pi * nu_d
+    Q_tot = 1 / (1 / Qc + 1 / Q_in)
+    kappa_in = w_c / Qc
+    kappa = w_c / Q_tot
+    photon_flux = P / (const.h * nu_d)
+    n = (
+        kappa_in / (kappa**2 / 4 + (w_d - w_c) ** 2) * (photon_flux)
+    )  # RWA has been used
+    return n
 
 
 def nbar_S11(P, Qi, Qc, nu):
@@ -813,13 +817,13 @@ def g_from_chi(chi, Ec, nuq, nur):
 
 
 def purcell_T1(g, fr, fq, qr):
-    kappa_r = 2 * np.pi * fr / qr
+    kappa_r = 2 * pi * fr / qr
     kappa_q = (g**2 / (fr - fq) ** 2) * kappa_r
     return 1 / kappa_q
 
 
 def purcell_T1_inv(g, fr, fq, qr):
-    kappa_r = 2 * np.pi * fr / qr
+    kappa_r = 2 * pi * fr / qr
     T1q = 1 / ((g**2 / (fr - fq) ** 2) / kappa_r)
     return T1q
 
@@ -837,13 +841,13 @@ def purcell_Qi(g, fr, fq, qr):
     Returns:
     float: Purcell limited internal quality factor Qi.
     """
-    kappa_r = 2 * np.pi * fr / qr
+    kappa_r = 2 * pi * fr / qr
     kappa_q = (g**2 / (fr - fq) ** 2) * kappa_r
     return fr / kappa_q
 
 
 def Ej_from_Lj(Lj):
-    return (Phi0 / (2 * np.pi)) ** 2 / Lj
+    return (Phi0 / (2 * pi)) ** 2 / Lj
 
 
 def add_complex_fit(fitdict, modenum, phase_fit):
@@ -908,7 +912,6 @@ def lorfuncsum(p, x, N=2):
 def fitlorsum(
     xdata,
     ydata,
-    N=1,
     fitparams=None,
     domain=None,
     showfit=False,
@@ -916,37 +919,32 @@ def fitlorsum(
     label="",
     debug=False,
 ):
-    """fit lorentzian sum:
-    returns [amp1, center1, hwhm1, ..., offset]"""
+    """fit lorentzian:
+    returns [offset,amplitude,center,hwhm]"""
     if domain is not None:
         fitdatax, fitdatay = selectdomain(xdata, ydata, domain)
     else:
         fitdatax = xdata
         fitdatay = ydata
-
     if fitparams is None:
-        fitparams = np.zeros(3 * N + 1)
-        # Correct mapping for lorfuncsum: [amp, center, hwhm, ..., offset]
-        fitparams[0] = max(fitdatay) - min(fitdatay)  # Peak 1 Amp
-        fitparams[1] = fitdatax[np.argmax(fitdatay)]  # Peak 1 Center
-        fitparams[2] = (max(fitdatax) - min(fitdatax)) / 10.0  # Peak 1 HWHM
-        fitparams[3 * N] = (fitdatay[0] + fitdatay[-1]) / 2.0  # Offset at end
-
-    if debug:
+        fitparams = 0 * np.ones(3 * N + 1)
+        fitparams[0] = (fitdatay[0] + fitdatay[-1]) / 2.0
+        fitparams[1] = max(fitdatay) - min(fitdatay)
+        fitparams[2] = fitdatax[np.argmax(fitdatay)]
+        fitparams[3] = (max(fitdatax) - min(fitdatax)) / 10.0
+    if debug == True:
         print(fitparams)
-
     p1 = dsf.fitgeneral(
         fitdatax,
         fitdatay,
-        lambda p, x: lorfuncsum(p, x, N=N),
+        lorfuncsum,
         fitparams,
         domain=None,
         showfit=showfit,
         showstartfit=showstartfit,
         label=label,
     )
-    # Correctly abs the first peak's HWHM (index 2)
-    p1[2] = abs(p1[2])
+    p1[3] = abs(p1[3])
     return p1
 
 
@@ -1068,25 +1066,11 @@ def sideband_to_buffer_freq(sideband_freq, ge_freq, ef_freq):
 def bs_decay_func(t, A, k1, k2, gbs, B):
     return (A / 2) * np.exp(-t * k1) * (1 + np.exp(-t * k2) * np.cos(2 * gbs * t)) + B
 
-
 def bs_decay_func_with_phase(t, A, k1, k2, gbs, B, phase):
-    return (A / 2) * np.exp(-t * k1) * (
-        1 + np.exp(-t * k2) * np.cos(2 * gbs * t + phase)
-    ) + B
-
+    return (A / 2) * np.exp(-t * k1) * (1 + np.exp(-t * k2) * np.cos(2 * gbs * t + phase)) + B
 
 def bs_decay_heating_func(t, A, k1, k2, k_heat, heat_pop, gbs, B):
-    return (
-        (A / 2)
-        * np.exp(-t * k1)
-        * (
-            1
-            + np.exp(-t * k2) * np.cos(2 * gbs * t)
-            - heat_pop * (1 - np.exp(-t * k_heat))
-        )
-        + A / 2 * heat_pop * (1 - np.exp(-t * k_heat))
-        + B
-    )
+    return (A / 2) * np.exp(-t * k1) * (1 + np.exp(-t * k2) * np.cos(2 * gbs * t) - heat_pop * (1 - np.exp(-t * k_heat))) + A / 2 * heat_pop * (1 - np.exp(-t * k_heat)) + B
 
 
 def dbm_to_watts(dbm):
@@ -1194,12 +1178,10 @@ def _bs_rabi_freq(nu, nu_bs, gbs, tau):
     Delta = 2.0 * np.pi * (nu - nu_bs)
     gbs *= 2.0 * np.pi
     Omega = np.sqrt(4.0 * gbs**2 + Delta**2)
-    return (4.0 * gbs**2 / Omega**2) * np.sin(0.5 * Omega * tau) ** 2
-
+    return (4.0 * gbs**2 / Omega**2) * np.sin(0.5 * Omega * tau)**2
 
 def bs_rabi_freq(x, nu_bs, gbs, tau, a):
     return a * _bs_rabi_freq(x, nu_bs, gbs, tau)
-
 
 def fit_spectroscopy(x, y, pulse_length, custom_settings=None):
     x, y = np.asarray(x, float), np.asarray(y, float)
@@ -1216,10 +1198,10 @@ def fit_spectroscopy(x, y, pulse_length, custom_settings=None):
         tau=tau,
         a=(baseline - y.min()),
     )
-    bs_params["nu_bs"].set(min=x.min(), max=x.max())
-    bs_params["gbs"].set(min=0.0)
-    bs_params["tau"].set(vary=False)
-    bs_params.add("width", expr="2.0*sqrt((1/tau)**2 - 4.0*gbs**2)")
+    bs_params['nu_bs'].set(min=x.min(), max=x.max())
+    bs_params['gbs'].set(min=0.0)
+    bs_params['tau'].set(vary=False)
+    bs_params.add('width', expr='2.0*sqrt((1/tau)**2 - 4.0*gbs**2)')
 
     model = bs_model + lin_model
     params = model.make_params()
@@ -1228,8 +1210,9 @@ def fit_spectroscopy(x, y, pulse_length, custom_settings=None):
     if custom_settings:
         for param_name, settings in custom_settings.items():
             params[param_name].set(**settings)
-
+            
     return model.fit(y, params, x=x)
+
 
 
 # =============================================================================
@@ -1263,9 +1246,7 @@ def analyze_spectroscopy(
 
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
-        suffix = (
-            f"bs_{alice_or_bob[0]}{mode}_spectroscopy" if suffix is None else suffix
-        )
+        suffix = f"bs_{alice_or_bob[0]}{mode}_spectroscopy" if suffix is None else suffix
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=suffix)
@@ -1311,9 +1292,7 @@ def analyze_spectroscopy(
 
         pulse_length = bs_flat_len + 2 * bs_ramp_len
         pulse_length *= 1e3
-        result = fit_spectroscopy(
-            freq, y, pulse_length, custom_settings=current_settings
-        )
+        result = fit_spectroscopy(freq, y, pulse_length, custom_settings=current_settings)
 
         bs_freq = result.params["nu_bs"].value
         bs_freq_err = result.params["nu_bs"].stderr or 0.0
@@ -1441,14 +1420,10 @@ def _bs_fidelity(x):
     k1, k2, gbs = x
     tbs = 0.5 * jnp.pi / gbs
     return 0.5 * (jnp.exp(-k1 * tbs) + jnp.exp(-(k1 + k2) * tbs))
-
-
 def _bs_fidelity_heated(x):
     k1, k2, k_heat, heat_pop, gbs = x
     tbs = 0.5 * jnp.pi / gbs
-    return (1 / 2) * jnp.exp(-tbs * k1) * (
-        1 + jnp.exp(-tbs * k2) - heat_pop * (1 - jnp.exp(-tbs * k_heat))
-    ) + 1 / 2 * heat_pop * (1 - jnp.exp(-tbs * k_heat))
+    return (1 / 2) * jnp.exp(-tbs * k1) * (1 + jnp.exp(-tbs * k2) - heat_pop * (1 - jnp.exp(-tbs * k_heat))) + 1 / 2 * heat_pop * (1 - jnp.exp(-tbs * k_heat))
 
 
 def format_err(val, err):
@@ -1494,7 +1469,6 @@ def fit_rabi(t, y, pi_guess, custom_settings=None, yerr=None):
     weights = 1 / yerr if yerr is not None else None
     return model.fit(y, params, t=t, weights=weights)
 
-
 def fit_rabi_with_phase(t, y, pi_guess, custom_settings=None, yerr=None):
     model = Model(bs_decay_func_with_phase)
     params = model.make_params()
@@ -1517,8 +1491,7 @@ def fit_rabi_with_phase(t, y, pi_guess, custom_settings=None, yerr=None):
     weights = 1 / yerr if yerr is not None else None
     return model.fit(y, params, t=t, weights=weights)
 
-
-def fit_rabi_heated(t, y, pi_guess, custom_settings=None, yerr=None):
+def fit_rabi_heated(t, y, pi_guess, custom_settings=None,yerr=None):
     model = Model(bs_decay_heating_func)
     params = model.make_params()
 
@@ -1542,6 +1515,8 @@ def fit_rabi_heated(t, y, pi_guess, custom_settings=None, yerr=None):
     return model.fit(y, params, t=t, weights=weights)
 
 
+
+
 # =============================================================================
 # 3. THE MAIN ORCHESTRATOR
 # =============================================================================
@@ -1552,17 +1527,18 @@ def analyze_rabi(
     data_path,
     alice_or_bob="alice",
     suffix="bs_bob_3_rabi_with_sb",
-    oldsuffix=False,  # band-aid for now, we should find a more elegant solution
+    oldsuffix=False, #band-aid for now, we should find a more elegant solution
     global_overrides=None,
     fit_overrides=None,
     heated_fit=False,
     plotfits=True,
     plotfills=True,
     plotlines=True,
-    yerr=None,
+    yerr=None
 ):
     if fit_overrides is None:
         fit_overrides = {}
+
 
     # Zip the pairs against your standard 1D arrays
     tasks = list(zip(file_mode_pairs, startfits, pi_times_fit))
@@ -1584,7 +1560,7 @@ def analyze_rabi(
         # --- 1. Load Data via LabData (Assumed defined globally) ---
         if oldsuffix:
             suffix = f"bs_{alice_or_bob[0]}{mode}_rabi"
-
+        
         try:
             data = LabData(data_path, filenum=filenum, suffix=suffix)
         except FileNotFoundError:
@@ -1630,9 +1606,7 @@ def analyze_rabi(
 
         # --- 3. Fit ---
         if heated_fit:
-            result = fit_rabi_heated(
-                t_fit, y_fit, pi_guess, custom_settings=current_settings
-            )
+            result = fit_rabi_heated(t_fit, y_fit, pi_guess, custom_settings=current_settings)
         else:
             result = fit_rabi(t_fit, y_fit, pi_guess, custom_settings=current_settings)
 
@@ -1669,23 +1643,16 @@ def analyze_rabi(
             x_vals = jnp.array([v["k1"], v["k2"], v["k_heat"], v["heat_pop"], v["gbs"]])
 
             if result.covar is not None:
+
                 if len(result.covar) != len(x_vals):
-                    rows = range(1, len(x_vals) + 1)
+                    rows = range(1, len(x_vals)+1)
                     cols = rows
                     cov = result.covar[np.ix_(rows, cols)]
                 else:
                     cov = result.covar
-
+                
             else:
-                cov = np.diag(
-                    [
-                        err_k1**2,
-                        err_k2**2,
-                        v["k_heat"] ** 2,
-                        v["heat_pop"] ** 2,
-                        err_gbs**2,
-                    ]
-                )
+                cov = np.diag([err_k1**2, err_k2**2, v["k_heat"]**2, v["heat_pop"]**2, err_gbs**2])
 
             bs_fidelity_jax, cov_f = propagate(_bs_fidelity_heated, x_vals, cov)
 
@@ -1693,8 +1660,9 @@ def analyze_rabi(
             x_vals = jnp.array([v["k1"], v["k2"], v["gbs"]])
 
             if result.covar is not None:
+                
                 if len(result.covar) != len(x_vals):
-                    rows = range(1, len(x_vals) + 1)
+                    rows = range(1, len(x_vals)+1)
                     cols = rows
                     cov = result.covar[np.ix_(rows, cols)]
                 else:
@@ -1703,6 +1671,7 @@ def analyze_rabi(
                 cov = np.diag([err_k1**2, err_k2**2, err_gbs**2])
 
             bs_fidelity_jax, cov_f = propagate(_bs_fidelity, x_vals, cov)
+        
 
         bs_fidelity = float(bs_fidelity_jax)
         bs_fidelity_err = float(jnp.sqrt(jnp.abs(cov_f)))
@@ -1881,9 +1850,9 @@ def analyze_bangbang(
     suffix="bs_b3_bangbang",
     global_overrides=None,
     fit_overrides=None,
-    plot_2d=False,
-    sweep_2d_plot=None,
-):
+    plot_2d = False,
+    sweep_2d_plot = None
+    ):
     if fit_overrides is None:
         fit_overrides = {}
 
@@ -1904,9 +1873,10 @@ def analyze_bangbang(
     xs_odd = []
     ys_even = []
     ys_odd = []
-
+    ys = []
     bs_amps = []
     bs_freqs = []
+
 
     for ii, (filenum, startfit, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
@@ -1937,11 +1907,11 @@ def analyze_bangbang(
         if bs_amp in (None, "None"):
             bs_amp = data.q0[f"bs_{alice_or_bob}_amps"][mode]
         bs_amps.append(bs_amp)
-
+        
         bs_ramp_len = data.exp.get("bs_ramp")
         if bs_ramp_len in (None, "None"):
             bs_ramp_len = data.q0[f"bs_{alice_or_bob}_ramp_lens"][mode]
-        bs_length = data.exp.get("bs_length")
+        bs_length = data.exp.get("bs_length")        
         if bs_length in (None, "None"):
             bs_pi_time_flat = data.q0[f"bs_{alice_or_bob}_flat_lens"][mode]
             pulse_duration_us = (bs_pi_time_flat + 2 * bs_ramp_len) * 1e6
@@ -1964,10 +1934,7 @@ def analyze_bangbang(
             alpha=0.3,
         )
         ax.plot(
-            [],
-            [],
-            " ",
-            label=r"$\nu_{bs}=$" + f"{bs_freq / 1e9:.5f} GHz\namp = {bs_amp:.6f}",
+            [], [], " ", label=r"$\nu_{bs}=$" + f"{bs_freq/1e9:.5f} GHz\namp = {bs_amp:.6f}"
         )
 
         for env_type in envelopes_to_process:
@@ -2084,13 +2051,15 @@ def analyze_bangbang(
                     "y_raw": y_env,
                 }
             )
-
-        n_fine2 = np.linspace(n_pulses[0], n_pulses[-1] * 10, 10000)
-        upper_fit = results[-2]["fit_result"].eval(n=n_fine2)
-        lower_fit = results[-1]["fit_result"].eval(n=n_fine2)
+        
+        n_fine2 = np.linspace(n_pulses[0], n_pulses[-1]*10, 10000)
+        upper_fit = results[-2]['fit_result'].eval(n=n_fine2)
+        lower_fit = results[-1]['fit_result'].eval(n=n_fine2)
         intersection_idx = np.argmin(np.abs(upper_fit - lower_fit))
         intersection_n = n_fine2[intersection_idx]
-        results[-1].update({"intersection_n": intersection_n})
+        results[-1].update(
+            {"intersection_n": intersection_n}
+            )
 
         ax.set(
             xlabel="Number of $\pi$ pulses (n)",
@@ -2116,18 +2085,14 @@ def analyze_bangbang(
         ys_even = np.array(ys_even)
         ys_odd = np.array(ys_odd)
         sweep = bs_amps if sweep_2d_plot == "amp" else bs_freqs
-        fig2d, ax2d = plt.subplots(1, 2, figsize=(13, 4))
-        ax2d[0].pcolormesh(xs_even, sweep, ys_even, shading="auto", cmap="viridis")
+        fig2d, ax2d = plt.subplots(1,2, figsize=(13, 4))
+        ax2d[0].pcolormesh(xs_even, sweep, ys_even, shading='auto', cmap='viridis')
         ax2d[0].set_xlabel("Number of $\pi$ pulses (n)")
-        ax2d[0].set_ylabel(
-            f"Beamsplitter {'Amplitude' if sweep_2d_plot == 'amp' else 'Frequency'}"
-        )
+        ax2d[0].set_ylabel(f"Beamsplitter {'Amplitude' if sweep_2d_plot == 'amp' else 'Frequency'}")
         ax2d[0].set_title("Even Pulses")
-        ax2d[1].pcolormesh(xs_odd, sweep, ys_odd, shading="auto", cmap="viridis")
+        ax2d[1].pcolormesh(xs_odd, sweep, ys_odd, shading='auto', cmap='viridis')
         ax2d[1].set_xlabel("Number of $\pi$ pulses (n)")
-        ax2d[1].set_ylabel(
-            f"Beamsplitter {'Amplitude' if sweep_2d_plot == 'amp' else 'Frequency'}"
-        )
+        ax2d[1].set_ylabel(f"Beamsplitter {'Amplitude' if sweep_2d_plot == 'amp' else 'Frequency'}")
         ax2d[1].set_title("Odd Pulses")
         # todo make colorbar
         # plt.subplots_adjust(top=0.88)
@@ -2179,7 +2144,6 @@ def propagate(f, x, cov):
         raise ValueError(f"Unsupported input dimensions: {dims}")
 
     return f_x, cov_f
-
 
 def diag_square(x):
     x2 = np.square(x)
@@ -2252,9 +2216,7 @@ def analyze_t1(
         if suffix is None:
             current_suffix = f"bs_{alice_or_bob[0]}{mode}_t1"
         elif "{" in str(suffix):
-            current_suffix = str(suffix).format(
-                alice_or_bob=alice_or_bob, mode=mode, a_or_b=alice_or_bob[0]
-            )
+            current_suffix = str(suffix).format(alice_or_bob=alice_or_bob, mode=mode, a_or_b=alice_or_bob[0])
         else:
             current_suffix = str(suffix)
 
@@ -2275,8 +2237,7 @@ def analyze_t1(
         y = data.P_e
 
         current = data.exp.get("flux_current", 0)
-        flux = data.q0.get("flux", 0.0)
-
+        flux = data.q0.get("flux", None)
         current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
 
@@ -2287,7 +2248,7 @@ def analyze_t1(
                 current_settings[param_name] = settings
 
         result = fit_t1(time, y, custom_settings=current_settings)
-
+        
         t1_val = result.params["T1"].value
         t1_err = result.params["T1"].stderr or 0.0
 
@@ -2338,27 +2299,20 @@ def analyze_t1(
             pass
 
         ax.plot(
-            time_fine,
-            fit_fine,
-            c=c,
-            linestyle="-",
-            label=rf"$T_1 = {format_err(t1_val, t1_err)}\ \mu s$",
+            time_fine, 
+            fit_fine, 
+            c=c, 
+            linestyle="-", 
+            label=rf"$T_1 = {format_err(t1_val, t1_err)}\ \mu s$"
         )
 
         ax.axvline(t1_val, linestyle="--", color=c)
 
         info_text = (
             f"Current = {current * 1e3:.3f} mA\n"
-            rf"Flux = {flux:.3f} $\Phi_0$"
         )
 
-        props = dict(
-            boxstyle="round",
-            facecolor="white",
-            alpha=0.8,
-            edgecolor="lightgray",
-            linewidth=1,
-        )
+        props = dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="lightgray", linewidth=1)
         ax.text(
             0.95,
             0.95,
@@ -2372,7 +2326,7 @@ def analyze_t1(
 
         ax.set(xlabel=r"t ($\mu s$)", ylabel="$P_e$")
         ax.set_xlim(-time.max() * 0.1, time.max() * 1.1)
-
+        
         axtitle = (f"Storage {mode}" if mode != 0 else "SNAIL") + f", file {filenum}"
         ax.legend(fontsize="small", title=axtitle, loc="center right")
 
@@ -2384,28 +2338,26 @@ def analyze_t1(
 
     return pd.DataFrame(results), fig
 
-
 # =============================================================================
 # Ramsey / Echo Plotter
 # =============================================================================
 def ramsey_decay_func(t, A, T2, f, phi, B):
     return A * np.exp(-t / T2) * np.cos(2 * np.pi * f * t + phi) + B
 
-
 def fit_ramsey(t, y, is_echo=False, custom_settings=None):
     model = Model(ramsey_decay_func)
     params = model.make_params()
-
+    
     rough_A = (np.max(y) - np.min(y)) / 2.0
     if len(y) > 0 and y[0] < np.mean(y):
         rough_A = -rough_A
     rough_B = np.mean(y)
     rough_T2 = np.mean(t) if len(t) > 0 else 1.0
-
+    
     params["A"].set(value=rough_A, min=-2.0, max=2.0)
     params["T2"].set(value=rough_T2, min=0.001, max=1000)
     params["B"].set(value=rough_B, min=-1.0, max=1.0)
-
+    
     # guess f from FFT or just set a standard bound
     n = len(t)
     if n > 3:
@@ -2425,7 +2377,6 @@ def fit_ramsey(t, y, is_echo=False, custom_settings=None):
             params[param_name].set(**settings)
 
     return model.fit(y, params, t=t)
-
 
 def analyze_ramsey(
     filenums,
@@ -2458,20 +2409,14 @@ def analyze_ramsey(
             seq_str = "echo" if is_echo else "ramsey"
             current_suffix = f"bs_{alice_or_bob[0]}{mode}_{seq_str}"
         elif "{" in str(suffix):
-            current_suffix = str(suffix).format(
-                alice_or_bob=alice_or_bob, mode=mode, a_or_b=alice_or_bob[0]
-            )
+            current_suffix = str(suffix).format(alice_or_bob=alice_or_bob, mode=mode, a_or_b=alice_or_bob[0])
         else:
             current_suffix = str(suffix)
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
-            expected_file = (
-                f"{str(filenum).zfill(5)}_{current_suffix}.h5"
-                if current_suffix
-                else f"{str(filenum).zfill(5)}.h5"
-            )
+            expected_file = f"{str(filenum).zfill(5)}_{current_suffix}.h5" if current_suffix else f"{str(filenum).zfill(5)}.h5"
             ax.text(
                 0.5,
                 0.5,
@@ -2479,7 +2424,7 @@ def analyze_ramsey(
                 ha="center",
                 va="center",
                 fontsize=8,
-                color="red",
+                color="red"
             )
             ax.axis("off")
             continue
@@ -2488,7 +2433,7 @@ def analyze_ramsey(
         if time.ndim > 1:
             time = time[0]
         time = time * 1e6
-
+        
         y = data.P_e
 
         current = data.exp.get("flux_current", 0)
@@ -2504,10 +2449,10 @@ def analyze_ramsey(
                 current_settings[param_name] = settings
 
         result = fit_ramsey(time, y, is_echo=is_echo, custom_settings=current_settings)
-
+        
         t2_val = result.params["T2"].value
         t2_err = result.params["T2"].stderr or 0.0
-
+        
         f_val = result.params["f"].value
         f_err = result.params["f"].stderr or 0.0
 
@@ -2559,15 +2504,17 @@ def analyze_ramsey(
         except Exception:
             pass
 
-        label_str = (
-            rf"$T_2^* = {format_err(t2_val, t2_err)}\ \mu s$"
-            if not is_echo
-            else rf"$T_{{2,E}} = {format_err(t2_val, t2_err)}\ \mu s$"
-        )
+        label_str = rf"$T_2^* = {format_err(t2_val, t2_err)}\ \mu s$" if not is_echo else rf"$T_{{2,E}} = {format_err(t2_val, t2_err)}\ \mu s$"
         if not is_echo:
             label_str += "\n" + rf"$f = {format_err(f_val, f_err)}$ MHz"
-
-        ax.plot(time_fine, fit_fine, c=c, linestyle="-", label=label_str)
+            
+        ax.plot(
+            time_fine, 
+            fit_fine, 
+            c=c, 
+            linestyle="-", 
+            label=label_str
+        )
 
         ax.axvline(t2_val, linestyle="--", color=c)
 
@@ -2576,13 +2523,7 @@ def analyze_ramsey(
             rf"Flux = {flux:.3f} $\Phi_0$"
         )
 
-        props = dict(
-            boxstyle="round",
-            facecolor="white",
-            alpha=0.8,
-            edgecolor="lightgray",
-            linewidth=1,
-        )
+        props = dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="lightgray", linewidth=1)
         ax.text(
             0.95,
             0.95,
@@ -2596,7 +2537,7 @@ def analyze_ramsey(
 
         ax.set(xlabel=r"t ($\mu s$)", ylabel="$P_e$")
         ax.set_xlim(-time.max() * 0.1, time.max() * 1.1)
-
+        
         axtitle = (f"Storage {mode}" if mode != 0 else "SNAIL") + f", file {filenum}"
         ax.legend(fontsize="small", title=axtitle, loc="upper right")
 
@@ -2608,6 +2549,7 @@ def analyze_ramsey(
     plt.tight_layout()
 
     return pd.DataFrame(results), fig
+
 
 
 def print_fit_result(result_list, multiplier, line_break=False):
@@ -2633,117 +2575,479 @@ def temperature_q(nu, rat):
     h = 2 * np.pi * 1.054e-34
     return h * nu / (Kb * np.log(1 / rat))
 
-
 def occupation_r(nu, T):
     Kb = 1.38e-23
     h = 2 * np.pi * 1.054e-34
     return 1 / (np.exp(h * nu / (Kb * T)) - 1)
 
-
 def nth_from_contrast(contrasts):
     ratio = contrasts[1] / contrasts[0]
     return 1 / (ratio - 1)
 
+def dbm_to_watts(dbm):
+    return 10 ** ((dbm - 30) / 10)
+
+import copy
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from lmfit import Model
+from matplotlib.colors import to_rgba
+
 
 # =============================================================================
-# adding context to saved figures
+# HELPER FUNCTIONS FOR OVERRIDES
 # =============================================================================
+def _merge_param_dicts(base, override):
+    """Recursively merges parameter setting dictionaries."""
+    merged = copy.deepcopy(base) if base else {}
+    if not override:
+        return merged
+    for param, settings in override.items():
+        if param in merged and isinstance(merged[param], dict) and isinstance(settings, dict):
+            merged[param].update(settings)
+        else:
+            merged[param] = copy.deepcopy(settings)
+    return merged
 
 
-def get_physical_cell(nb_path):
-    """Deterministically finds the cell number using Jupyter's hidden cell IDs."""
-    ipy = get_ipython()
-    if not ipy or not nb_path:
-        return "Unknown_Cell"
+def _extract_fit_configs(override_dict):
+    """Splits an override dictionary into 'bs', 'bs_cold', 'bs_hot', and 'sat' sections."""
+    bs_cfg = {}
+    bs_cold_cfg = {}
+    bs_hot_cfg = {}
+    sat_cfg = {}
 
-    try:
-        # 1. Intercept the hidden metadata from the frontend's execution request
-        # This contains the unique ID of the cell that triggered this code
-        parent_request = ipy.kernel.get_parent()
-        cell_id = parent_request.get("metadata", {}).get("cellId")
+    if not override_dict:
+        return bs_cfg, bs_cold_cfg, bs_hot_cfg, sat_cfg
 
-        # 2. Open the .ipynb file from the hard drive
-        with open(nb_path, "r", encoding="utf-8") as f:
-            nb_data = json.load(f)
+    # Explicit section keys
+    if "sat" in override_dict or "saturation" in override_dict:
+        sat_cfg = override_dict.get("sat", override_dict.get("saturation", {}))
+    if "bs" in override_dict:
+        bs_cfg = override_dict["bs"]
+    if "bs_cold" in override_dict:
+        bs_cold_cfg = override_dict["bs_cold"]
+    if "bs_hot" in override_dict:
+        bs_hot_cfg = override_dict["bs_hot"]
 
-        cell_num = 1
-        matching_cells = []
+    # Auto-route top-level parameter names if section keys were omitted
+    sat_params = {"nth_sat", "tau"}
+    bs_params = {"gbs", "k1", "k2", "A"}
+    for k, v in override_dict.items():
+        if k in sat_params:
+            sat_cfg[k] = v
+        elif k in bs_params:
+            bs_cfg[k] = v
 
-        # 3. Look for the exact ID match
-        for cell in nb_data.get("cells", []):
-            # Jupyter v4.5+ standard stores it in cell['id']
-            # Some older/custom frontends nest it in cell['metadata']['id']
-            current_id = cell.get("id") or cell.get("metadata", {}).get("id")
-
-            if cell_id and current_id == cell_id:
-                return f"Cell {cell_num}"
-
-            # --- BRUTE FORCE FALLBACK ---
-            # If the frontend didn't send an ID, fall back to our string matching
-            if not cell_id and cell.get("cell_type") == "code":
-                exec_count = ipy.execution_count
-                current_code = ipy.history_manager.input_hist_raw[exec_count].strip()
-                source_code = "".join(cell.get("source", [])).strip()
-
-                if current_code == source_code:
-                    matching_cells.append(str(cell_num))
-
-            cell_num += 1
-
-        # Return fallback results if ID matching wasn't an option
-        if not cell_id:
-            if not matching_cells:
-                return "Unsaved_Cell_State"
-            if len(matching_cells) == 1:
-                return f"Cell {matching_cells[0]}"
-            return f"Cells [{', '.join(matching_cells)}]"
-
-        return "Cell_Not_Found"
-
-    except Exception as e:
-        print(
-            f"⚠️ Warning: Metadata extraction failed! Plot saved, but cell location is missing. Error: {repr(e)}"
-        )
-        return "Parse_Error"
+    return bs_cfg, bs_cold_cfg, bs_hot_cfg, sat_cfg
 
 
-def get_notebook_context(data_files=None):
-    """Gathers context, including physical cell location."""
-    try:
-        nb_path = str(ipynbname.path())
-    except Exception:
-        nb_path = None
+# =============================================================================
+# FIT WRAPPERS
+# =============================================================================
+def fit_bs_contrast(t, y, startfit, fixed_gbs=None, custom_settings=None):
+    """
+    Fits standard beamsplitter decay to extract contrast (A) and gbs.
+    If fixed_gbs is provided, the frequency is locked (used for heated sweeps).
+    Accepts custom_settings dictionary to set/freeze parameters.
+    """
+    model = Model(bs_decay_func)
+    params = model.make_params()
 
-    physical_loc = get_physical_cell(nb_path)
+    mean_y = (np.max(y) + np.min(y)) / 2
+    A_guess = (np.max(y) - np.min(y)) / 2
 
-    # Format the data files cleanly
-    if data_files:
-        if isinstance(data_files, str):
-            data_files = [data_files]
-        files_str = f" | Data: {', '.join(data_files)}"
+    # Invert guess if starting below the mean
+    if len(y) > startfit and y[startfit] < mean_y:
+        A_guess = -A_guess
+
+    params["A"].set(value=A_guess, min=-1.0, max=1.0)
+    params["k1"].set(value=0.01, min=1e-5)
+    params["k2"].set(value=0.01, min=1e-5)
+
+    if fixed_gbs is not None:
+        params["gbs"].set(value=fixed_gbs, vary=False)
+        params["B"].set(value=0.0)
     else:
-        files_str = ""
+        params["gbs"].set(value=2.0, vary=True, min=0.01)
+        params["B"].set(value=np.min(y), min=-1.0, max=1.0)
 
-    nb_name = Path(nb_path).name if nb_path else "Unknown_Notebook"
-    return f"Notebook: {nb_name} | {physical_loc}{files_str}"
+    # Apply fit overrides if specified
+    if custom_settings:
+        for param_name, settings in custom_settings.items():
+            if param_name in params:
+                params[param_name].set(**settings)
+
+    return model.fit(y[startfit:], params, t=t[startfit:])
 
 
-def save_plot(fname, fig=None, data_files=None, **kwargs):
+def exp_sat_func(t, nth_sat, tau, B):
     """
-    Saves a figure with injected physical notebook metadata.
-    Acts as a drop-in replacement for plt.savefig().
+    nth_sat: The thermal saturation limit as t -> inf
+    B: Initial nth at t = 0
     """
-    if fig is None:
-        fig = plt.gcf()
+    return (nth_sat - B) * (1 - np.exp(-t / tau)) + B
 
-    context = get_notebook_context(data_files)
-    ext = Path(fname).suffix.lower()
-    metadata = kwargs.pop("metadata", {})
 
-    if ext == ".pdf":
-        metadata["Subject"] = context
-    elif ext in [".png", ".svg"]:
-        metadata["Description"] = context
+def fit_heating_saturation(t, y, custom_settings=None):
+    """
+    Uses lmfit to find tau, the baseline (B), and saturation limit (nth_sat).
+    Accepts custom_settings dictionary to set/freeze parameters.
+    """
+    t, y = np.asarray(t, float), np.asarray(y, float)
+    model = Model(exp_sat_func)
+    params = model.make_params()
 
-    kwargs["metadata"] = metadata
-    fig.savefig(fname, **kwargs)
+    initial_nth = y[0] if len(y) > 0 else 0
+    sat_nth = np.mean(y[-3:]) if len(y) > 3 else (y[-1] if len(y) > 0 else 0.1)
+    rough_tau = np.mean(t) if len(t) > 0 else 1.0
+
+    params['nth_sat'].set(value=sat_nth, min=0)
+    params['tau'].set(value=rough_tau, min=1e-5)
+    params['B'].set(value=initial_nth, min=0)
+
+    # Apply fit overrides if specified
+    if custom_settings:
+        for param_name, settings in custom_settings.items():
+            if param_name in params:
+                params[param_name].set(**settings)
+
+    return model.fit(y, params, t=t)
+
+
+def load_bf_channel(file_paths, column_name):
+    """
+    Loads and concatenates Bluefors logs. 
+    Accepts a single file path, a list of file paths, or a glob pattern string.
+    """
+    if isinstance(file_paths, str):
+        file_paths = glob.glob(file_paths) if "*" in file_paths else [file_paths]
+    
+    dfs = []
+    for fp in file_paths:
+        try:
+            df = pd.read_csv(fp, names=["date_str", "time_str", column_name], header=None)
+            df["time"] = pd.to_datetime(df["date_str"] + df["time_str"], format="%d-%m-%y%H:%M:%S", errors="coerce")
+            dfs.append(df.dropna(subset=["time"]))
+        except Exception as e:
+            print(f"⚠️ Warning: Could not load '{fp}': {e}")
+            
+    if not dfs:
+        return None
+        
+    full_df = pd.concat(dfs, ignore_index=True)
+    return full_df.sort_values("time").drop_duplicates(subset=["time"])[["time", column_name]]
+
+# =============================================================================
+# ORCHESTRATOR
+# =============================================================================
+def analyze_bs_heating_population(
+    filenum_pairs,
+    heating_modes,
+    swap_modes,
+    data_path,
+    alice_or_bob_heating="alice",
+    alice_or_bob_swap="bob",
+    startfits=None,
+    buffer_freq_override=None,
+    plot_individual_rabis=False,
+    independent_rabi_scale=False,
+    global_overrides=None,
+    fit_overrides=None,
+    bf_logs=None,  
+    fig=None,
+    ax=None,
+    static_nths=None,
+):
+    """
+    Analyzes SNAIL thermal population via beamsplitter and Rabi measurements.
+    Optionally syncs Bluefors log temperature based on h5 file modification time.
+    """
+    import os
+    from datetime import datetime
+
+    if startfits is None:
+        startfits = [0] * len(filenum_pairs)
+    if fit_overrides is None:
+        fit_overrides = {}
+    if global_overrides is None:
+        global_overrides = {}
+
+    # --- Pre-load Bluefors Log(s) ---
+    df_bf = None
+    if bf_logs is not None:
+        if isinstance(bf_logs, dict):
+            for channel_name, file_path in bf_logs.items():
+                df_channel = load_bf_channel(file_path, column_name=channel_name)
+                if df_bf is None:
+                    df_bf = df_channel
+                else:
+                    df_bf = pd.merge(df_bf, df_channel, on='time', how='outer')
+            df_bf = df_bf.sort_values('time').reset_index(drop=True)
+        elif isinstance(bf_logs, (str, list)):
+            df_bf = load_bf_channel(bf_logs, column_name='mxc_temp')
+
+    tasks = list(zip(filenum_pairs, heating_modes, swap_modes, startfits))
+    n = len(tasks)
+    ncols = int(np.ceil(np.sqrt(n)))
+    nrows = int(np.ceil(n / ncols)) if ncols > 0 else 1
+
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
+    axs = axs.flatten()
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n // 5 + 1)
+
+    results = []
+    rabi_figs = []
+
+    # Extract global overrides
+    g_bs, g_bs_cold, g_bs_hot, g_sat = _extract_fit_configs(global_overrides)
+
+    for ii, (item, h_mode, s_mode, startfit) in enumerate(tasks):
+        ax_main, c = axs[ii], colors[ii]
+        suffix = f"heating_{h_mode}_swap_{s_mode}"
+        
+        # Detect if we have a single pair [7,8] or a group of pairs [[7,8], [9,10]]
+        if isinstance(item[0], (int, np.integer)):
+            file_groups = [item] 
+        else:
+            file_groups = item 
+
+        # Use the first pair in the group for dictionary lookups and metadata
+        primary_filenums = file_groups[0]
+        task_key = tuple(primary_filenums)
+
+        task_override = (
+            fit_overrides.get(task_key)
+            or fit_overrides.get(primary_filenums[0])
+            or fit_overrides.get((h_mode, s_mode), {})
+        )
+        t_bs, t_bs_cold, t_bs_hot, t_sat = _extract_fit_configs(task_override)
+
+        dataset_sat_settings = _merge_param_dicts(g_sat, t_sat)
+        dataset_bs_settings = _merge_param_dicts(g_bs, t_bs)
+        dataset_bs_cold = _merge_param_dicts(_merge_param_dicts(g_bs, g_bs_cold), _merge_param_dicts(t_bs, t_bs_cold))
+        dataset_bs_hot = _merge_param_dicts(_merge_param_dicts(g_bs, g_bs_hot), _merge_param_dicts(t_bs, t_bs_hot))
+
+        # Combined lists for the saturation fit
+        combined_heating_times = []
+        combined_nths = []
+        combined_rabi_fits_cold = []
+        combined_rabi_fits_hot = []
+        combined_contrasts_cold = []
+        combined_contrasts_hot = []
+        
+        h5_time = pd.NaT
+        buffer_freq = buffer_freq_override
+
+        for g_idx, filenums in enumerate(file_groups):
+            try:
+                data0 = LabData(data_path, filenum=filenums[0], suffix=suffix)
+                data1 = LabData(data_path, filenum=filenums[1], suffix=suffix)
+            except FileNotFoundError:
+                print(f"Files {filenums} Not Found")
+                continue
+
+            # Grab timestamp and buffer freq only from the very first file in the group
+            if g_idx == len(file_groups) - 1:
+                try:
+                    file_path = getattr(data1, 'filepath', os.path.join(data_path, f"{str(filenums[1]).zfill(5)}_{suffix}.h5"))
+                    file_timestamp = os.path.getmtime(file_path)
+                    h5_time = datetime.fromtimestamp(file_timestamp)
+                except Exception as exceptionname:
+                    print(exceptionname)
+
+                if buffer_freq_override is None:
+                    buffer_freq = data0.q0.get(f"cav_{alice_or_bob_swap}_freq")
+                    if buffer_freq is None:
+                        print(f"⚠️ Warning (Files {filenums}): 'cav_{alice_or_bob_swap}_freq' not found in config. Using 0 Hz.")
+                        buffer_freq = 0
+
+                storage_mode = int(h_mode[1])
+                heating_buffer_a_or_b = h_mode[0]
+                heating_buffer = 'alice' if heating_buffer_a_or_b == 'a' else 'bob'
+                bs_freq = data0.q0.get(f'bs_{heating_buffer}_freqs')[storage_mode]
+
+            heating_times = data0.ypts * 1e6
+            time = data0.xpts * 1e6
+
+            if plot_individual_rabis:
+                n_sweeps = len(heating_times)
+                r_cols = 4
+                r_rows = int(np.ceil(n_sweeps / r_cols))
+                rabi_fig, rabi_axs = plt.subplots(r_rows, r_cols, figsize=(4 * r_cols, 3 * r_rows))
+                rabi_axs = np.atleast_1d(rabi_axs).flatten()
+                rabi_fig.suptitle(f"Rabi Sweeps - Files {filenums} (Mode {h_mode})", y=1.02)
+            else:
+                rabi_fig, rabi_axs = None, None
+
+            for sweep_idx in range(len(heating_times)):
+                y0 = data0.P_e[sweep_idx] if hasattr(data0, 'P_e') else data0.I[sweep_idx]
+                y1 = data1.P_e[sweep_idx] if hasattr(data1, 'P_e') else data1.I[sweep_idx]
+
+                sweep_override = {}
+                if "sweeps" in task_override and sweep_idx in task_override["sweeps"]:
+                    sweep_override = task_override["sweeps"][sweep_idx]
+                elif (task_key, sweep_idx) in fit_overrides:
+                    sweep_override = fit_overrides[(task_key, sweep_idx)]
+
+                sw_bs, sw_cold, sw_hot, _ = _extract_fit_configs(sweep_override)
+
+                final_bs_cold = _merge_param_dicts(_merge_param_dicts(dataset_bs_cold, sw_bs), sw_cold)
+                final_bs_hot = _merge_param_dicts(_merge_param_dicts(dataset_bs_hot, sw_bs), sw_hot)
+
+                res0 = fit_bs_contrast(time, y0, startfit, custom_settings=final_bs_cold)
+                contrast0 = abs(res0.params["A"].value)
+                fixed_gbs = res0.params["gbs"].value
+
+                res1 = fit_bs_contrast(time, y1, startfit, fixed_gbs=fixed_gbs, custom_settings=final_bs_hot)
+                contrast1 = abs(res1.params["A"].value)
+
+                combined_rabi_fits_cold.append(res0)
+                combined_rabi_fits_hot.append(res1)
+                combined_contrasts_cold.append(contrast0)
+                combined_contrasts_hot.append(contrast1)
+
+                if plot_individual_rabis and rabi_axs is not None:
+                    rax = rabi_axs[sweep_idx]
+                    t_fine = np.linspace(time.min(), time.max(), 500)
+
+                    c0 = plt.rcParams["axes.prop_cycle"].by_key()["color"][0]
+                    c1 = plt.rcParams["axes.prop_cycle"].by_key()["color"][1]
+
+                    fit0 = res0.eval(t=t_fine)
+                    rax.plot(time, y0, 'o', color=c0, alpha=0.5, ms=4)
+                    rax.plot(t_fine, fit0, '-', color=c0, label=f"Cold C={contrast0:.3f}")
+
+                    fit1 = res1.eval(t=t_fine)
+                    if independent_rabi_scale:
+                        rax_hot = rax.twinx()
+                        rax.tick_params(axis='y', colors=c0)
+                        rax_hot.tick_params(axis='y', colors=c1)
+                        rax_hot.spines['left'].set_color(c0)
+                        rax_hot.spines['right'].set_color(c1)
+                    else:
+                        rax_hot = rax
+
+                    rax_hot.plot(time, y1, 's', color=c1, alpha=0.5, ms=4)
+                    rax_hot.plot(t_fine, fit1, '-', color=c1, label=f"Hot C={contrast1:.3f}")
+
+                    if independent_rabi_scale:
+                        y0_ptp = np.ptp(y0) if np.ptp(y0) > 0 else 1
+                        rax.set_ylim(np.min(y0) - 0.1 * y0_ptp, np.max(y0) + 0.1 * y0_ptp)
+                        y1_ptp = np.ptp(y1) if np.ptp(y1) > 0 else 1
+                        rax_hot.set_ylim(np.min(y1) - 0.1 * y1_ptp, np.max(y1) + 0.1 * y1_ptp)
+                        lines, labels = rax.get_legend_handles_labels()
+                        lines2, labels2 = rax_hot.get_legend_handles_labels()
+                        rax_hot.legend(lines + lines2, labels + labels2, fontsize="x-small", loc="best")
+                    else:
+                        y_all = np.concatenate([y0, y1])
+                        y_ptp = np.ptp(y_all) if np.ptp(y_all) > 0 else 1
+                        rax.set_ylim(np.min(y_all) - 0.1 * y_ptp, np.max(y_all) + 0.1 * y_ptp)
+                        rax.legend(fontsize="x-small", loc="best")
+
+                    rax.set_title(f"t_heat = {heating_times[sweep_idx]:.2f} µs", fontsize="small")
+
+                ratio = contrast1 / contrast0
+                temp = temperature_q(buffer_freq, ratio)
+                nth = occupation_r(buffer_freq, temp)
+                
+                combined_heating_times.append(heating_times[sweep_idx])
+                combined_nths.append(nth)
+
+            if plot_individual_rabis:
+                for idx in range(len(heating_times), len(rabi_axs)):
+                    rabi_fig.delaxes(rabi_axs[idx])
+                rabi_fig.tight_layout()
+                rabi_figs.append(rabi_fig)
+
+        # Skip fitting if no data was found
+        if not combined_heating_times:
+            ax_main.text(0.5, 0.5, "No Data Found", ha="center", va="center")
+            ax_main.axis("off")
+            continue
+
+        # --- PERFORM THE COMBINED FIT ---
+        combined_heating_times = np.asarray(combined_heating_times)
+        combined_nths = np.asarray(combined_nths)
+        
+        # Sort by heating time in case data files were provided out of order
+        sort_idx = np.argsort(combined_heating_times)
+        combined_heating_times = combined_heating_times[sort_idx]
+        combined_nths = combined_nths[sort_idx]
+
+        if static_nths is not None and static_nths[ii] is not None:
+            combined_heating_times = np.r_[0, combined_heating_times]
+            combined_nths = np.r_[static_nths[ii], combined_nths]
+
+        res_sat = fit_heating_saturation(combined_heating_times, combined_nths, custom_settings=dataset_sat_settings)
+        tau = res_sat.params["tau"].value
+        nth_sat = res_sat.params["nth_sat"].value
+        
+
+        results.append({
+            "filenums": primary_filenums, # Logs under the primary file pair
+            "heating_mode": h_mode,
+            "swap_mode": s_mode,
+            "time": h5_time,
+            "tau": tau,
+            "nth_sat": nth_sat,
+            "buffer_freq": buffer_freq,
+            "bs_freq": bs_freq,
+            "heating_times": combined_heating_times,
+            "nths": combined_nths,
+            "contrasts_cold": np.asarray(combined_contrasts_cold)[sort_idx],
+            "contrasts_hot": np.asarray(combined_contrasts_hot)[sort_idx],
+            "rabi_fits_cold": combined_rabi_fits_cold,
+            "rabi_fits_hot": combined_rabi_fits_hot,
+            "fit_result": res_sat
+        })
+
+        fcolor = to_rgba(c, alpha=0.25)
+        ax_main.plot(combined_heating_times, combined_nths, marker="o", linestyle="", color=c,
+                     markerfacecolor=fcolor, markeredgecolor=c, ms=8)
+
+        t_fine = np.linspace(combined_heating_times.min(), combined_heating_times.max(), 1000)
+        fit_fine = res_sat.eval(t=t_fine)
+        ax_main.plot(t_fine, fit_fine, c=c, linestyle="-")
+
+        ax_main.axvline(tau, color="k", linestyle="--", alpha=0.5, label=rf"$\tau$ = {tau:.3f} $\mu$s")
+        ax_main.axhline(nth_sat, color="k", linestyle="-.", alpha=0.5, label=rf"$n_{{th}}^{{sat}}$ = {nth_sat:.3f}")
+
+        ax_main.set(xlabel=r"Heating Time ($\mu$s)", ylabel=r"$n_{th}$")
+        ax_main.set_title(f"Heated w/ {alice_or_bob_heating.capitalize()}-S{h_mode}", fontsize="small")
+        ax_main.legend(fontsize="x-small")
+
+    for idx in range(len(tasks), len(axs)):
+        fig.delaxes(axs[idx])
+
+    if fig is None or ax is None:
+        fig.suptitle("Beamsplitter Heating Saturation", y=1.02)
+        plt.tight_layout()
+
+    df_results = pd.DataFrame(results)
+
+    if bf_logs and not df_results.empty:
+        df_results = df_results.sort_values("time")
+        for col_name, log_path in bf_logs.items():
+            df_chan = load_bf_channel(log_path, col_name)
+            if df_chan is not None:
+
+                df_results = pd.merge_asof(
+                    df_results,
+                    df_chan,
+                    on="time",
+                    direction="backward",
+                    tolerance=pd.Timedelta("1.5minutes")
+                )
+        df_results = df_results.sort_index()
+
+    if plot_individual_rabis:
+        return df_results, fig, rabi_figs
+
+    return df_results, fig, None
