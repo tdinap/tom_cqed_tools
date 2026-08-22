@@ -25,14 +25,16 @@ from scipy.constants import e, h, k
 from slab import fitlor
 from tabulate import tabulate
 
-import ipynbname
+# import ipynbname
+import subprocess
+import urllib.request
 from IPython import get_ipython
+from IPython.display import HTML, display
 from pathlib import Path
-
-# from scipy.optimize import curve_fit
 
 Phi0 = h / (2 * e)
 hbar = h / (2 * np.pi)
+
 
 
 def signal_plot(freq, log_mag, phase, lin_mag, real, imag):
@@ -1167,25 +1169,67 @@ class LabData:
 
 
 # =============================================================================
-# FIT WRAPPER
+# FIT WRAPPERS
 # =============================================================================
-def fit_spectroscopy_old(x, y, custom_settings=None):
+def fit_lorentzian_spectroscopy(x, y, custom_settings=None):
+    """
+    Fits a Lorentzian peak/dip with a linear baseline for continuous-wave,
+    Gaussian, or long-pulse qubit/cavity spectroscopy.
+
+    Parameters
+    ----------
+    x : array-like
+        Frequency array (e.g. in GHz).
+    y : array-like
+        Signal / response array (e.g. Pe population or transmission/reflection).
+    custom_settings : dict, optional
+        Dictionary mapping parameter names ('center', 'sigma', 'amplitude', 'slope', 'intercept')
+        to dict of lmfit Parameter settings (e.g. {'center': {'min': 5.0, 'max': 6.0}}).
+
+    Returns
+    -------
+    lmfit.model.ModelResult
+        Fit result containing parameters including 'center', 'sigma', 'fwhm', 'amplitude', 'height'.
+    """
+    x, y = np.asarray(x, float), np.asarray(y, float)
     lor_model = LorentzianModel()
     lin_model = LinearModel()
     model = lor_model + lin_model
 
-    lor_params = lor_model.guess(y, x)
+    med = np.median(y)
+    peak_prom = np.max(y) - med
+    dip_prom = med - np.min(y)
+
     lin_params = lin_model.guess(y, x)
+
+    # Automatic peak vs dip detection
+    if peak_prom >= dip_prom:
+        center_guess = x[np.argmax(y)]
+        height_guess = np.max(y) - med
+    else:
+        center_guess = x[np.argmin(y)]
+        height_guess = np.min(y) - med
+
+    sigma_guess = (x.max() - x.min()) / 10.0 if len(x) > 1 else 1.0
+    amplitude_guess = height_guess * np.pi * sigma_guess
+
+    lor_params = lor_model.make_params(
+        center=center_guess,
+        sigma=sigma_guess,
+        amplitude=amplitude_guess,
+    )
+    lor_params["center"].set(min=x.min(), max=x.max())
+    lor_params["sigma"].set(min=0.0)
 
     params = model.make_params()
     params.add_many(*lor_params.values(), *lin_params.values())
 
-    # Preserving your specific logic to invert the initial amplitude guess
-    params["amplitude"].value *= -1
-
     if custom_settings:
         for param_name, settings in custom_settings.items():
-            params[param_name].set(**settings)
+            if param_name in params:
+                params[param_name].set(**settings)
+            else:
+                params.add(param_name, **settings)
 
     return model.fit(y, params, x=x)
 
@@ -1201,25 +1245,72 @@ def bs_rabi_freq(x, nu_bs, gbs, tau, a):
     return a * _bs_rabi_freq(x, nu_bs, gbs, tau)
 
 
-def fit_spectroscopy(x, y, pulse_length, custom_settings=None):
+def fit_flattop_spectroscopy(x, y, pulse_length, custom_settings=None):
+    """
+    Fits a coherent Rabi sinc-squared line shape with a linear baseline
+    for square / flat-top spectroscopy pulses.
+
+    Parameters
+    ----------
+    x : array-like
+        Frequency array (e.g. in GHz).
+    y : array-like
+        Signal / response array (e.g. Pe population or transmission/reflection).
+    pulse_length : float
+        Effective duration of the flat-top pulse (tau), in units consistent with x
+        (e.g., if x is in GHz, tau is in ns or 1/x units).
+    custom_settings : dict, optional
+        Dictionary mapping parameter names to lmfit Parameter settings.
+
+    Returns
+    -------
+    lmfit.model.ModelResult
+        Fit result containing parameters:
+        - 'nu_bs': center frequency
+        - 'gbs': Rabi coupling rate
+        - 'rabi_rate': 2 * gbs
+        - 't_pi': calibrated pi-pulse duration (0.25 / gbs)
+        - 'fwhm': estimated full-width at half-maximum (0.8858 / tau)
+        - 'width' / 'null_width': null-to-null bandwidth (2 * sqrt((1/tau)^2 - 4*gbs^2))
+    """
     x, y = np.asarray(x, float), np.asarray(y, float)
 
     lin_model = LinearModel()
     lin_params = lin_model.guess(y, x)
 
     bs_model = Model(bs_rabi_freq)
-    baseline = np.percentile(y, 95)
+    med = np.median(y)
+    peak_prom = np.max(y) - med
+    dip_prom = med - np.min(y)
+
+    if peak_prom >= dip_prom:
+        # Peak (e.g. Pe population)
+        baseline = np.percentile(y, 10)
+        nu_bs_guess = x[np.argmax(y)]
+        a_guess = np.max(y) - baseline
+    else:
+        # Dip (e.g. reflection / transmission)
+        baseline = np.percentile(y, 90)
+        nu_bs_guess = x[np.argmin(y)]
+        a_guess = np.min(y) - baseline
+
     tau = pulse_length
     bs_params = bs_model.make_params(
-        nu_bs=x[np.argmin(y)],
+        nu_bs=nu_bs_guess,
         gbs=1.0 / (4.0 * tau),
         tau=tau,
-        a=(baseline - y.min()),
+        a=a_guess,
     )
     bs_params["nu_bs"].set(min=x.min(), max=x.max())
     bs_params["gbs"].set(min=0.0)
     bs_params["tau"].set(vary=False)
-    bs_params.add("width", expr="2.0*sqrt((1/tau)**2 - 4.0*gbs**2)")
+
+    # Derived parameters for convenience
+    bs_params.add("t_pi", expr="0.25 / max(gbs, 1e-12)")
+    bs_params.add("rabi_rate", expr="2.0 * gbs")
+    bs_params.add("fwhm", expr="0.8858 / tau")
+    bs_params.add("width", expr="2.0 * sqrt(max(0.0, (1.0/tau)**2 - 4.0*gbs**2))")
+    bs_params.add("null_width", expr="2.0 * sqrt(max(0.0, (1.0/tau)**2 - 4.0*gbs**2))")
 
     model = bs_model + lin_model
     params = model.make_params()
@@ -1227,15 +1318,65 @@ def fit_spectroscopy(x, y, pulse_length, custom_settings=None):
 
     if custom_settings:
         for param_name, settings in custom_settings.items():
-            params[param_name].set(**settings)
+            if param_name in params:
+                params[param_name].set(**settings)
+            else:
+                params.add(param_name, **settings)
 
     return model.fit(y, params, x=x)
+
+
+def fit_spectroscopy(x, y, pulse_length=None, mode="auto", custom_settings=None):
+    """
+    General entry point for fitting spectroscopy data.
+
+    Dispatches to:
+      - `fit_flattop_spectroscopy`: when mode='flattop' or pulse_length is provided.
+      - `fit_lorentzian_spectroscopy`: when mode='lorentzian' or (mode='auto' and pulse_length is None).
+
+    Parameters
+    ----------
+    x : array-like
+        Frequency array.
+    y : array-like
+        Signal / response array.
+    pulse_length : float, optional
+        Pulse duration for square/flat-top pulses. If provided, flattop model is used.
+    mode : {'auto', 'lorentzian', 'flattop'}, default 'auto'
+        Explicit model selection.
+    custom_settings : dict, optional
+        Overrides for lmfit parameters.
+
+    Returns
+    -------
+    lmfit.model.ModelResult
+    """
+    mode_clean = mode.lower() if isinstance(mode, str) else "auto"
+    if mode_clean == "flattop" or (mode_clean == "auto" and pulse_length is not None):
+        if pulse_length is None:
+            raise ValueError(
+                "pulse_length must be specified when using flattop spectroscopy fit. "
+                "If you intended a standard Lorentzian fit for Gaussian/CW pulses, "
+                "set mode='lorentzian' or call fit_lorentzian_spectroscopy(x, y)."
+            )
+        return fit_flattop_spectroscopy(x, y, pulse_length=pulse_length, custom_settings=custom_settings)
+    elif mode_clean in ("lorentzian", "auto"):
+        return fit_lorentzian_spectroscopy(x, y, custom_settings=custom_settings)
+    else:
+        raise ValueError(
+            f"Unrecognized spectroscopy mode: '{mode}'. "
+            "Supported modes are 'lorentzian' (for Gaussian/CW pulses) and 'flattop' (for square/flattop pulses)."
+        )
+
+
+# Backward-compatibility alias
+fit_spectroscopy_old = fit_lorentzian_spectroscopy
 
 
 # =============================================================================
 # ORCHESTRATOR
 # =============================================================================
-def analyze_spectroscopy(
+def analyze_flattop_spectroscopy(
     filenums,
     modes,
     data_path,
@@ -1245,6 +1386,9 @@ def analyze_spectroscopy(
     fit_overrides=None,
     plotfits=True,
     plotfills=True,
+    fig=None,
+    ax=None,
+    title=None,
 ):
     if fit_overrides is None:
         fit_overrides = {}
@@ -1253,8 +1397,11 @@ def analyze_spectroscopy(
     n_files = len(tasks)
     ncols = int(np.ceil(np.sqrt(n_files)))
     nrows = int(np.ceil(n_files / ncols)) if ncols > 0 else 1
-    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
-    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
     axs = axs.flatten()
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n_files // 5 + 1)
 
@@ -1263,20 +1410,14 @@ def analyze_spectroscopy(
 
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
-        suffix = (
-            f"bs_{alice_or_bob[0]}{mode}_spectroscopy" if suffix is None else suffix
-        )
+        
+        if suffix is None:
+            suffix = f"bs_{alice_or_bob[0]}{mode}_spectroscopy"
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=suffix)
         except FileNotFoundError:
-            ax.text(
-                0.5,
-                0.5,
-                f"File {filenum}\nMode {mode}\nNot Found",
-                ha="center",
-                va="center",
-            )
+            ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
             ax.axis("off")
             continue
 
@@ -1285,20 +1426,31 @@ def analyze_spectroscopy(
 
         current = data.exp.get("flux_current", 0)
         last_current = current
-        average_exponent = data.exp.get("average_exponent", 0)
-
-        bs_ramp_len = data.q0[f"bs_{alice_or_bob}_ramp_lens"][mode] * 1e6
-        bs_len_raw = data.exp.get("bs_length")
-
-        if bs_len_raw in (None, "None"):
-            bs_flat_len = data.q0[f"bs_{alice_or_bob}_flat_lens"][mode] * 1e6
+        
+        ramp_len = 0
+        if f"bs_{alice_or_bob}_ramp_lens" in data.q0:
+            ramp_len = data.q0[f"bs_{alice_or_bob}_ramp_lens"].get(mode, 0)
+        elif f"sb_{alice_or_bob}_ramp_lens" in data.q0:
+            ramp_len = data.q0[f"sb_{alice_or_bob}_ramp_lens"].get(mode, 0)
+            
+        ramp_len *= 1e6
+            
+        len_raw = data.exp.get("bs_length") or data.exp.get("sb_length")
+        
+        if len_raw in (None, "None"):
+            if f"bs_{alice_or_bob}_flat_lens" in data.q0:
+                flat_len = data.q0[f"bs_{alice_or_bob}_flat_lens"].get(mode, 0) * 1e6
+            elif f"sb_{alice_or_bob}_flat_lens" in data.q0:
+                flat_len = data.q0[f"sb_{alice_or_bob}_flat_lens"].get(mode, 0) * 1e6
+            else:
+                flat_len = 2.0  # fallback
         else:
-            bs_flat_len = bs_len_raw * 1e6 - 2 * bs_ramp_len
+            flat_len = len_raw * 1e6 - 2 * ramp_len
 
-        bs_range = data.q0[f"bs_{alice_or_bob}_dBm_ranges"][mode]
-        bs_amp = data.exp.get("bs_amplitude")
-        if bs_amp in (None, "None"):
-            bs_amp = data.q0[f"bs_{alice_or_bob}_amps"][mode]
+        amp = data.exp.get("bs_amplitude") or data.exp.get("sb_amplitude")
+        if amp in (None, "None"):
+            amp = data.q0.get(f"bs_{alice_or_bob}_amps", {}).get(mode, 
+                  data.q0.get(f"sb_{alice_or_bob}_amps", {}).get(mode, 0))
 
         current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
@@ -1309,129 +1461,52 @@ def analyze_spectroscopy(
             else:
                 current_settings[param_name] = settings
 
-        pulse_length = bs_flat_len + 2 * bs_ramp_len
+        pulse_length = flat_len + 2 * ramp_len
         pulse_length *= 1e3
-        result = fit_spectroscopy(
-            freq, y, pulse_length, custom_settings=current_settings
-        )
+        
+        result = fit_flattop_spectroscopy(freq, y, pulse_length, custom_settings=current_settings)
 
-        bs_freq = result.params["nu_bs"].value
-        bs_freq_err = result.params["nu_bs"].stderr or 0.0
-        bs_width = result.params["width"].value
+        center_freq = result.params["nu_bs"].value
+        center_freq_err = result.params["nu_bs"].stderr or 0.0
+        width = result.params["width"].value
+        fwhm = result.params["fwhm"].value
         gbs = result.params["gbs"].value * 2 * np.pi
-        tbs = 0.5 * np.pi / gbs * 1e-3
+        t_eff = 0.5 * np.pi / gbs * 1e-3
 
-        # 1. Calculate flux here so it can be added to the dataframe
         flux = flux_from_current(current, 73.1561e-3, -2.7060e-3)
 
-        results.append(
-            {
-                "filenum": filenum,
-                "mode": mode,
-                "current": current,
-                "flux": flux,  # Added to output dataframe
-                "bs_freq": bs_freq,
-                "bs_freq_err": bs_freq_err,
-                "width": bs_width,
-                "tbs": tbs,
-                "bs_amp": bs_amp,
-                "bs_flat_len": bs_flat_len,
-                "fit_result": result,
-                "x_raw": freq,
-                "y_raw": y,
-            }
-        )
+        results.append({
+            "filenum": filenum, "mode": mode, "current": current, "flux": flux,
+            "center": center_freq, "center_err": center_freq_err,
+            "width": width, "fwhm": fwhm,
+            "t_eff": t_eff, "amp": amp, "flat_len": flat_len,
+            "fit_result": result, "x_raw": freq, "y_raw": y,
+        })
 
-        # --- Plotting ---
         fcolor = to_rgba(c, alpha=0.25)
-        ax.plot(
-            freq,
-            y,
-            marker="o",
-            linestyle="",
-            color=c,
-            markerfacecolor=fcolor,
-            markeredgecolor=c,
-            ms=8,
-            label="Data",
-        )
+        ax.plot(freq, y, marker="o", linestyle="", color=c, markerfacecolor=fcolor, markeredgecolor=c, ms=8)
 
         freq_fine = np.linspace(freq.min(), freq.max(), 1000)
         fit_fine = result.eval(x=freq_fine)
+        ax.plot(freq_fine, fit_fine, c=c, linestyle="-")
+        ax.axvline(center_freq, linestyle="--", color=c)
+        if center_freq_err > 0 and not np.isnan(center_freq_err):
+            ax.axvspan(max(freq.min(), center_freq - center_freq_err), min(freq.max(), center_freq + center_freq_err), color=c, alpha=0.18)
 
-        # Prediction Band (Confidence + Residual Noise)
-        try:
-            model_error = result.eval_uncertainty(x=freq_fine, sigma=1)
-            residual_noise = np.std(result.residual)
-            prediction_error = np.sqrt(model_error**2 + residual_noise**2)
-            if plotfills:
-                ax.fill_between(
-                    freq_fine,
-                    fit_fine - prediction_error,
-                    fit_fine + prediction_error,
-                    color=c,
-                    alpha=0.15,
-                    edgecolor="none",
-                    label="Prediction Band",
-                )
-        except Exception:
-            pass
-
-        if plotfits:
-            ax.plot(freq_fine, fit_fine, c=c, linestyle="-", label="Fit")
-            ax.axvline(bs_freq, linestyle="--", color=c, label="Center Freq")
-
-        # Center Frequency Highlights
-        if bs_freq_err > 0 and plotfills:
-            ax.axvspan(
-                bs_freq - bs_freq_err,
-                bs_freq + bs_freq_err,
-                color=c,
-                alpha=0.35,
-                zorder=1,
-            )
-
-        # Text Block
-        info_text = (
-            f"range = {bs_range} dBm\n"
-            f"amp = {bs_amp:.4f}\n"
-            rf"$t_{{BSflat}}$ = {bs_flat_len:.3f} $\mu$s" + "\n"
-            rf"$t_{{BSramp}}$ = {bs_ramp_len:.3f} $\mu$s" + "\n"
-            rf"$\nu_{{bs}} = {format_err(bs_freq, bs_freq_err)}$ GHz" + "\n"
-            rf"n_avgs = $2^{{{average_exponent}}}$" + "\n"
-            rf"Flux = {flux:.3f} $\Phi_0$"
-        )
-
-        props = dict(boxstyle="round", facecolor="white", alpha=0, edgecolor="none")
-        ax.text(
-            0.05,
-            0.05,
-            info_text,
-            transform=ax.transAxes,
-            fontsize="x-small",
-            verticalalignment="bottom",
-            bbox=props,
-        )
+        info_text = f"Center = {center_freq:.4f} GHz\nFlux = {flux:.3f} $\\Phi_0$"
+        ax.text(0.05, 0.05, info_text, transform=ax.transAxes, fontsize="x-small",
+                verticalalignment="bottom", bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="lightgray"))
 
         ax.set(xlabel="Frequency (GHz)", ylabel="$P_e$")
-        ax.tick_params(axis="x", rotation=30)
+        ax.set_title(f"File {filenum}", fontsize="small")
 
-        axtitle = (
-            f"{alice_or_bob.capitalize()}-Storage {mode}"
-            if mode != 0
-            else f"{alice_or_bob.capitalize()}-SNAIL"
-        )
-        ax.set_title(f"{axtitle}, file {filenum}", fontsize="small")
-
-    # Delete unused axes
     for idx in range(len(tasks), len(axs)):
-        fig.delaxes(axs[idx])
+        axs[idx].set_visible(False)
 
-    fig.suptitle(
-        rf"Beamsplitter spectroscopy {alice_or_bob.capitalize()}. Current={last_current * 1e3:.3f} mA",
-        y=1.02,
-    )
-    plt.tight_layout()
+    if fig is None or ax is None:
+        sup_str = title if title is not None else f"Flattop Spectroscopy ({suffix})"
+        fig.suptitle(sup_str, y=1.02)
+        plt.tight_layout()
 
     return pd.DataFrame(results), fig
 
@@ -1473,18 +1548,44 @@ def format_err(val, err):
 # =============================================================================
 # 2. THE FIT WRAPPER
 # =============================================================================
-def fit_rabi(t, y, pi_guess, custom_settings=None, yerr=None):
-    model = Model(bs_decay_func)
+def rabi_func(t, A, k, gbs, phase, B):
+    return A * np.exp(-k * t) * np.cos(2 * gbs * t + phase) + B
+
+
+def fit_rabi(t, y, pi_guess=None, custom_settings=None, yerr=None):
+    '''Fit Rabi oscillations using standard damped cosine model with FFT initial frequency estimation.'''
+    t, y = np.asarray(t, float), np.asarray(y, float)
+    model = Model(rabi_func)
     params = model.make_params()
 
-    rough_A = np.max(y) - np.min(y)
-    rough_B = np.clip(np.mean(y), 0, 1)
-    rough_gbs = np.pi / (2 * pi_guess)
+    # Initial FFT estimation for frequency gbs if time step is regular
+    dt = np.mean(np.diff(t)) if len(t) > 1 else 1.0
+    f_fft = 0.0
+    if dt > 0 and len(t) >= 4:
+        fft_y = np.fft.rfft(y - np.mean(y))
+        fft_freqs = np.fft.rfftfreq(len(y), d=dt)
+        peak_idx = np.argmax(np.abs(fft_y[1:])) + 1 if len(fft_y) > 1 else 0
+        if peak_idx < len(fft_freqs):
+            f_fft = fft_freqs[peak_idx]
 
-    params["A"].set(value=rough_A, min=0.01, max=2.0)
-    params["k1"].set(value=1e-3, min=0, max=100)
-    params["k2"].set(value=1e-3, min=0, max=100)
-    params["gbs"].set(value=rough_gbs, min=0.005 * rough_gbs, max=5.0 * rough_gbs)
+    if f_fft > 0:
+        rough_gbs = np.pi * f_fft
+    elif pi_guess is not None and pi_guess > 0:
+        if pi_guess < 1e-3:
+            pi_guess = pi_guess * 1e6
+        rough_gbs = np.pi / (2 * pi_guess)
+    else:
+        rough_gbs = np.pi / (2 * 0.1)
+
+    rough_A = (np.max(y) - np.min(y)) / 2.0
+    rough_B = np.clip(np.mean(y), 0, 1)
+
+    max_gbs = max(50.0, np.pi / (2 * dt)) if dt > 0 else 50.0
+
+    params["A"].set(value=rough_A, min=0.01, max=1.0)
+    params["k"].set(value=0.5, min=0.0, max=50.0)
+    params["gbs"].set(value=rough_gbs, min=0.0, max=max_gbs)
+    params["phase"].set(value=np.pi, min=0, max=2 * np.pi)
     params["B"].set(value=rough_B, min=0.0, max=1.0)
 
     if custom_settings:
@@ -1545,14 +1646,14 @@ def fit_rabi_heated(t, y, pi_guess, custom_settings=None, yerr=None):
 # =============================================================================
 # 3. THE MAIN ORCHESTRATOR
 # =============================================================================
-def analyze_rabi(
+def analyze_flattop_rabi(
     file_mode_pairs,
     startfits,
     pi_times_fit,
     data_path,
     alice_or_bob="alice",
     suffix="bs_bob_3_rabi_with_sb",
-    oldsuffix=False,  # band-aid for now, we should find a more elegant solution
+    oldsuffix=False,
     global_overrides=None,
     fit_overrides=None,
     heated_fit=False,
@@ -1560,280 +1661,136 @@ def analyze_rabi(
     plotfills=True,
     plotlines=True,
     yerr=None,
+    fig=None,
+    ax=None,
+    title=None,
 ):
     if fit_overrides is None:
         fit_overrides = {}
 
-    # Zip the pairs against your standard 1D arrays
     tasks = list(zip(file_mode_pairs, startfits, pi_times_fit))
-
     n = len(tasks)
     ncols = int(np.ceil(np.sqrt(n)))
     nrows = int(np.ceil(n / ncols)) if ncols > 0 else 1
-    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows]) * 1.4
-    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
     axs = axs.flatten()
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n // 5 + 1)
 
     results = []
 
-    # Unpack the tuple-of-tuples cleanly
     for ii, ((filenum, mode), startfit, pi_guess) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
 
-        # --- 1. Load Data via LabData (Assumed defined globally) ---
         if oldsuffix:
             suffix = f"bs_{alice_or_bob[0]}{mode}_rabi"
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=suffix)
         except FileNotFoundError:
-            ax.text(
-                0.5,
-                0.5,
-                f"File {filenum}\nMode {mode}\nNot Found",
-                ha="center",
-                va="center",
-            )
+            ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
             ax.axis("off")
             continue
 
         time = data.xpts * 1e6
         y = data.P_e
 
-        bs_freq = data.q0[f"bs_{alice_or_bob}_freqs"][mode] / 1e9
-        bs_amp = (
-            data.exp.get("bs_amplitude")
-            if data.exp.get("bs_amplitude") not in (None, "None")
-            else data.q0[f"bs_{alice_or_bob}_amps"][mode]
-        )
-        bs_drive_range = data.q0[f"bs_{alice_or_bob}_dBm_ranges"][mode]
+        freq = data.q0.get(f"bs_{alice_or_bob}_freqs", {}).get(mode, 
+               data.q0.get(f"sb_{alice_or_bob}_freqs", {}).get(mode, 0)) / 1e9
+               
+        amp = data.exp.get("bs_amplitude") or data.exp.get("sb_amplitude")
+        if amp in (None, "None"):
+            amp = data.q0.get(f"bs_{alice_or_bob}_amps", {}).get(mode, 
+                  data.q0.get(f"sb_{alice_or_bob}_amps", {}).get(mode, 0))
+                  
+        drive_range = data.q0.get(f"bs_{alice_or_bob}_dBm_ranges", {}).get(mode, 
+                      data.q0.get(f"sb_{alice_or_bob}_dBm_ranges", {}).get(mode, 0))
 
-        current = data.exp.get("flux_current", 0)
-        flux = flux_from_current(current, 73.1561e-3, -2.7060e-3)
-        average_exponent = data.exp.get("average_exponent", 0)
-
-        # --- 2. Hierarchy of Overrides ---
-        current_settings = {}
-        if global_overrides:
-            current_settings = copy.deepcopy(global_overrides)
-
+        current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
+
         for param_name, settings in specific_overrides.items():
             if param_name in current_settings:
                 current_settings[param_name].update(settings)
             else:
                 current_settings[param_name] = settings
 
-        start_idx = int(startfit)
-        t_fit, y_fit = time[start_idx:], y[start_idx:]
+        start_idx = np.searchsorted(time, startfit)
+        t_fit = time[start_idx:]
+        y_fit = y[start_idx:]
 
-        # --- 3. Fit ---
-        if heated_fit:
-            result = fit_rabi_heated(
-                t_fit, y_fit, pi_guess, custom_settings=current_settings
-            )
-        else:
-            result = fit_rabi(t_fit, y_fit, pi_guess, custom_settings=current_settings)
-
-        # --- 4. Parameter and Standard Error Extraction ---
-        v = result.values
-        err_k1 = result.params["k1"].stderr or 0.0
-        err_k2 = result.params["k2"].stderr or 0.0
-        err_gbs = result.params["gbs"].stderr or 0.0
-
-        bs_t1 = 1 / v["k1"] if v["k1"] > 0 else np.inf
-        bs_t2 = 1 / v["k2"] if v["k2"] > 0 else np.inf
-        pi_time = np.pi / (2 * v["gbs"]) if v["gbs"] != 0 else 0.0
-
-        t1_err = (bs_t1**2) * err_k1 if bs_t1 != np.inf else 0.0
-        t2_err = (bs_t2**2) * err_k2 if bs_t2 != np.inf else 0.0
-        pi_time_err = pi_time * (err_gbs / v["gbs"]) if v["gbs"] != 0 else 0.0
-
-        # --- 5. Generalized Fidelity Error Propagation (JAX) ---
-        # var_names = ["k1", "k2", "gbs"]
-        # cov = np.zeros((3, 3))
-
-        # if getattr(result, "covar", None) is not None:
-        #     # Safely build the covariance matrix, allowing for fixed parameters
-        #     for r_idx, name_i in enumerate(var_names):
-        #         for c_idx, name_j in enumerate(var_names):
-        #             if name_i in result.var_names and name_j in result.var_names:
-        #                 idx_i = result.var_names.index(name_i)
-        #                 idx_j = result.var_names.index(name_j)
-        #                 cov[r_idx, c_idx] = result.covar[idx_i, idx_j]
-        # else:
-        #     cov = np.diag([err_k1**2, err_k2**2, err_gbs**2])
-
-        if heated_fit:
-            x_vals = jnp.array([v["k1"], v["k2"], v["k_heat"], v["heat_pop"], v["gbs"]])
-
-            if result.covar is not None:
-                if len(result.covar) != len(x_vals):
-                    rows = range(1, len(x_vals) + 1)
-                    cols = rows
-                    cov = result.covar[np.ix_(rows, cols)]
-                else:
-                    cov = result.covar
-
-            else:
-                cov = np.diag(
-                    [
-                        err_k1**2,
-                        err_k2**2,
-                        v["k_heat"] ** 2,
-                        v["heat_pop"] ** 2,
-                        err_gbs**2,
-                    ]
-                )
-
-            bs_fidelity_jax, cov_f = propagate(_bs_fidelity_heated, x_vals, cov)
-
-        else:
-            x_vals = jnp.array([v["k1"], v["k2"], v["gbs"]])
-
-            if result.covar is not None:
-                if len(result.covar) != len(x_vals):
-                    rows = range(1, len(x_vals) + 1)
-                    cols = rows
-                    cov = result.covar[np.ix_(rows, cols)]
-                else:
-                    cov = result.covar
-            else:
-                cov = np.diag([err_k1**2, err_k2**2, err_gbs**2])
-
-            bs_fidelity_jax, cov_f = propagate(_bs_fidelity, x_vals, cov)
-
-        bs_fidelity = float(bs_fidelity_jax)
-        bs_fidelity_err = float(jnp.sqrt(jnp.abs(cov_f)))
-
-        results.append(
-            {
-                "filenum": filenum,
-                "mode": mode,
-                "current": current,
-                "flux": flux,
-                "bs_freq": bs_freq,
-                "bs_amp": bs_amp,
-                "t1": bs_t1,
-                "t1_err": t1_err,
-                "t2": bs_t2,
-                "t2_err": t2_err,
-                "pi_time": pi_time,
-                "fidelity": bs_fidelity,
-                "fidelity_err": bs_fidelity_err,
-                "fit_result": result,
-                "x_raw": time,
-                "y_raw": y,
-            }
-        )
-
-        # --- 6. Plotting ---
-        fcolor = to_rgba(c, alpha=0.25)
-
-        # Cleaned up the raw data label
-        ax.plot(
-            time,
-            y,
-            marker="o",
-            linestyle="",
-            color=c,
-            markerfacecolor=fcolor,
-            markeredgecolor=c,
-            ms=8,
-            label="Data",
-        )
-
-        time_fine = np.linspace(time[0], time[-1], 10000)
-        fit_fine = result.eval(t=time_fine)
-
-        # --- Prediction Band ---
         try:
-            model_error = result.eval_uncertainty(t=time_fine, sigma=1)
-            residual_noise = np.std(result.residual)
-            prediction_error = np.sqrt(model_error**2 + residual_noise**2)
-            if plotfills:
-                ax.fill_between(
-                    time_fine,
-                    fit_fine - prediction_error,
-                    fit_fine + prediction_error,
-                    color=c,
-                    alpha=0.15,
-                    edgecolor="none",
-                    label="Prediction Band",
-                )
-        except Exception:
-            pass
+            result = fit_rabi(t_fit, y_fit, pi_guess=pi_guess, custom_settings=current_settings)
+            pi_time = result.params["pi_time"].value
+            pi_time_err = result.params["pi_time"].stderr or 0.0
+            is_valid, status_code, metrics = validate_fit_quality(t_fit, y_fit, result, fit_type="rabi")
+            red_chi2 = metrics.get("red_chi2", np.nan)
+        except Exception as e:
+            print(f"Rabi fit failed for file {filenum}: {e}")
+            result = None
+            pi_time, pi_time_err = np.nan, 0.0
+            is_valid, status_code, metrics = False, "WARNING_FIT_CRASHED", {"reason": str(e)}
+            red_chi2 = np.nan
 
-        if bs_t2 < time.max():
-            if plotlines:
-                ax.axvline(
-                    bs_t2,
-                    linestyle=":",
-                    color=c,
-                    label=rf"$T_{{2,BS}} = {format_err(bs_t2, t2_err)} \mu s$",
-                )
-        if plotfits:
-            ax.plot(
-                time_fine,
-                fit_fine,
-                linestyle="-",
-                color=c,
-                label=rf"$T_1={format_err(bs_t1, t1_err)} \mu s$",
-            )
-        if plotlines:
-            ax.axvline(
-                pi_time,
-                linestyle="--",
-                color=c,
-                label=rf"$t_{{\pi}} = {format_err(pi_time, pi_time_err)} \mu s$"
-                + "\n"
-                + rf"$\mathscr{{F}}_{{BS}} = {format_err(bs_fidelity, bs_fidelity_err)}$",
-            )
+        current = data.exp.get("flux_current", 0)
+        flux = flux_from_current(current, 73.1561e-3, -2.7060e-3)
 
-        # --- Text Box for Metadata ---
-        info_text = (
-            rf"$\nu_{{bs}}$ = {bs_freq:.5f} GHz" + "\n"
-            f"amp = {bs_amp:.4f}\n"
-            f"range = {bs_drive_range} dBm\n"
-            f"Current = {current * 1e3:.3f} mA\n"
-            rf"Flux = {flux:.3f} $\Phi_0$" + "\n"
-            rf"n_avgs = $2^{{{average_exponent}}}$"
-        )
+        results.append({
+            "filenum": filenum, "mode": mode, "current": current, "flux": flux,
+            "pi_time": pi_time, "pi_time_err": pi_time_err, "freq": freq,
+            "amp": amp, "drive_range": drive_range,
+            "fit_result": result, "x_raw": time, "y_raw": y,
+            "fit_status": status_code, "fit_valid": is_valid,
+        })
+
+        fcolor = to_rgba(c, alpha=0.25)
+        ax.plot(time, y, marker="o", linestyle="", color=c if is_valid else "#c62828",
+                markerfacecolor=fcolor if is_valid else "#ffebee", markeredgecolor=c if is_valid else "#c62828", ms=8)
+
+        if result is not None:
+            t_fine = np.linspace(t_fit.min(), t_fit.max(), 1000)
+            fit_fine = result.eval(t=t_fine)
+            ax.plot(t_fine, fit_fine, c=c if is_valid else "#c62828", linestyle="-" if is_valid else "--")
+            if not np.isnan(pi_time) and pi_time > 0:
+                ax.axvline(startfit + pi_time, linestyle="--", color=c if is_valid else "#c62828")
+                if pi_time_err > 0 and not np.isnan(pi_time_err) and pi_time_err < 5 * pi_time:
+                    ax.axvspan(max(time.min(), startfit + pi_time - pi_time_err), min(time.max(), startfit + pi_time + pi_time_err), color=c if is_valid else "#c62828", alpha=0.18)
+
+        info_lines = []
+        if not is_valid:
+            info_lines.append(rf"$\bf{{[INVALID:\ {status_code}]}}$")
+            reason_short = metrics.get("reason", "")
+            if reason_short and len(reason_short) < 40:
+                info_lines.append(rf"$\it{{{reason_short}}}$")
+        info_lines.append(rf"$\tau_\pi = {format_err(pi_time, pi_time_err)}\ \mu$s" if pi_time < 1e3 else rf"$\tau_\pi = {format_err(pi_time, pi_time_err)}$")
+        info_lines.append(rf"Flux = {flux:.3f} $\Phi_0$")
+        if not np.isnan(red_chi2):
+            info_lines.append(rf"$\chi^2_{{\rm red}} = {red_chi2:.2f}$")
+        info_text = "\n".join(info_lines)
 
         props = dict(
             boxstyle="round",
-            facecolor="white",
-            alpha=0.8,
-            edgecolor="lightgray",
-            linewidth=1,
+            facecolor="#ffebee" if not is_valid else "white",
+            alpha=0.88,
+            edgecolor="#d32f2f" if not is_valid else "lightgray",
+            linewidth=1.8 if not is_valid else 1.0,
         )
-        ax.text(
-            0.05,
-            0.05,
-            info_text,
-            transform=ax.transAxes,
-            fontsize="x-small",
-            verticalalignment="center",
-            horizontalalignment="right",
-            bbox=props,
-        )
+        ax.text(0.95, 0.95, info_text, transform=ax.transAxes, fontsize="x-small",
+                verticalalignment="top", horizontalalignment="right", bbox=props)
 
-        ax.set(xlabel=r"t ($\mu s$)", ylabel="$P_e$")
-        ax.set_xlim(-time.max() * 0.1, time.max() * 1.1)
-        ax.set_ylim(-0.05, 1.05)
-
-        axtitle = (f"Storage {mode}" if mode != 0 else "SNAIL") + f", file {filenum}"
-
-        # Legend strictly for fit lines, moved out of the way of the text box
-        ax.legend(fontsize="small", title=axtitle, loc="upper right")
+        ax.set(xlabel="Pulse Length (us)", ylabel="$P_e$")
+        ax.set_title(f"File {filenum}", fontsize="small")
 
     for idx in range(len(tasks), len(axs)):
-        fig.delaxes(axs[idx])
+        axs[idx].set_visible(False)
 
-    # Removed current from suptitle
-    fig.suptitle(f"Beamsplitter Rabi {alice_or_bob.capitalize()}", y=1.02, fontsize=32)
-    plt.tight_layout()
+    if fig is None or ax is None:
+        sup_str = title if title is not None else f"Flattop Rabi ({suffix})"
+        fig.suptitle(sup_str, y=1.02)
+        plt.tight_layout()
 
     return pd.DataFrame(results), fig
 
@@ -1883,7 +1840,9 @@ def analyze_bangbang(
     fit_overrides=None,
     plot_2d=False,
     sweep_2d_plot=None,
-):
+
+    fig=None,
+    ax=None,):
     if fit_overrides is None:
         fit_overrides = {}
 
@@ -1891,8 +1850,11 @@ def analyze_bangbang(
     n_files = len(tasks)
     ncols = int(np.ceil(np.sqrt(n_files)))
     nrows = int(np.ceil(n_files / ncols)) if ncols > 0 else 1
-    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows]) * 1.4
-    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
     axs = axs.flatten()
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n_files // 5 + 1)
 
@@ -2053,7 +2015,7 @@ def analyze_bangbang(
             label_text = (
                 f"{env_type.capitalize()} Env:\n"
                 f"$\\mathcal{{F}}_{{BS}} = {format_err(pulse_fidelity, err_fidelity)}$\n"
-                f"$T_{{eff}} = {format_err(t_eff, 0) if t_eff != np.inf else 'NaN'} \ \mu s$"
+                f"$T_{{eff}} = {format_err(t_eff, 0) if t_eff != np.inf else 'NaN'} \\ \\mu s$"
             )
 
             ax.plot(
@@ -2093,7 +2055,7 @@ def analyze_bangbang(
         results[-1].update({"intersection_n": intersection_n})
 
         ax.set(
-            xlabel="Number of $\pi$ pulses (n)",
+            xlabel="Number of $\\pi$ pulses (n)",
             ylabel="$P_e$",
             xlim=(-n_pulses.max() * 0.1, n_pulses.max() * 1.1),
             ylim=(-0.05, 1.05),
@@ -2102,7 +2064,7 @@ def analyze_bangbang(
         ax.legend(fontsize="small", title=axtitle, loc="upper right")
 
     for idx in range(len(tasks), len(axs)):
-        fig.delaxes(axs[idx])
+        axs[idx].set_visible(False)
     fig.suptitle(
         rf"Beamsplitter Bang-Bang {alice_or_bob.capitalize()}, Current={last_current * 1e3:.3f} mA",
         y=1.02,
@@ -2118,13 +2080,13 @@ def analyze_bangbang(
         sweep = bs_amps if sweep_2d_plot == "amp" else bs_freqs
         fig2d, ax2d = plt.subplots(1, 2, figsize=(13, 4))
         ax2d[0].pcolormesh(xs_even, sweep, ys_even, shading="auto", cmap="viridis")
-        ax2d[0].set_xlabel("Number of $\pi$ pulses (n)")
+        ax2d[0].set_xlabel("Number of $\\pi$ pulses (n)")
         ax2d[0].set_ylabel(
             f"Beamsplitter {'Amplitude' if sweep_2d_plot == 'amp' else 'Frequency'}"
         )
         ax2d[0].set_title("Even Pulses")
         ax2d[1].pcolormesh(xs_odd, sweep, ys_odd, shading="auto", cmap="viridis")
-        ax2d[1].set_xlabel("Number of $\pi$ pulses (n)")
+        ax2d[1].set_xlabel("Number of $\\pi$ pulses (n)")
         ax2d[1].set_ylabel(
             f"Beamsplitter {'Amplitude' if sweep_2d_plot == 'amp' else 'Frequency'}"
         )
@@ -2206,15 +2168,26 @@ def fit_t1(t, y, custom_settings=None):
     model = Model(t1_decay_func)
     params = model.make_params()
 
-    rough_A = np.max(y) - np.min(y)
-    if len(y) > 0 and y[0] < y[-1]:
-        rough_A = -rough_A
-    rough_B = np.mean(y[-3:]) if len(y) > 3 else np.min(y)
-    rough_T1 = np.mean(t) if len(t) > 0 else 1.0
+    t_span = max(float(np.ptp(t)), 1.0) if len(t) > 0 else 1.0
+    rough_B = float(np.mean(y[-max(2, int(len(y) * 0.15)):])) if len(y) > 3 else float(np.min(y))
+    rough_A = float(y[0] - rough_B) if len(y) > 0 else float(np.ptp(y))
+    rough_T1 = float(max(t_span / 2.0, 1.0))
 
-    params["A"].set(value=rough_A, min=-2.0, max=2.0)
-    params["T1"].set(value=rough_T1, min=0.001, max=1000)
-    params["B"].set(value=rough_B, min=-1.0, max=1.0)
+    # Log-linearized initial estimate if monotonic decay
+    try:
+        y_shifted = y - rough_B
+        valid = (y_shifted > 0.05 * abs(rough_A)) if rough_A > 0 else (y_shifted < 0.05 * rough_A)
+        if np.sum(valid) >= 4:
+            log_y = np.log(np.abs(y_shifted[valid]))
+            slope, _ = np.polyfit(t[valid], log_y, 1)
+            if slope < -1e-7:
+                rough_T1 = float(np.clip(-1.0 / slope, 0.1, 50.0 * t_span))
+    except Exception:
+        pass
+
+    params["A"].set(value=rough_A, min=-2.5, max=2.5)
+    params["T1"].set(value=rough_T1, min=0.01, max=max(50.0 * t_span, 1e6))
+    params["B"].set(value=rough_B, min=-0.5, max=1.5)
 
     if custom_settings:
         for param_name, settings in custom_settings.items():
@@ -2227,10 +2200,12 @@ def analyze_t1(
     filenums,
     modes,
     data_path,
-    alice_or_bob="alice",
+    alice_or_bob=None,
     suffix=None,
     global_overrides=None,
     fit_overrides=None,
+    fig=None,
+    ax=None,
 ):
     if fit_overrides is None:
         fit_overrides = {}
@@ -2239,8 +2214,11 @@ def analyze_t1(
     n = len(tasks)
     ncols = int(np.ceil(np.sqrt(n)))
     nrows = int(np.ceil(n / ncols)) if ncols > 0 else 1
-    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
-    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
     axs = axs.flatten()
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n // 5 + 1)
 
@@ -2250,10 +2228,12 @@ def analyze_t1(
         ax, c = axs[ii], colors[ii]
 
         if suffix is None:
-            current_suffix = f"bs_{alice_or_bob[0]}{mode}_t1"
+            a_or_b = (alice_or_bob[0] if alice_or_bob else "a")
+            current_suffix = f"bs_{a_or_b}{mode}_t1"
         elif "{" in str(suffix):
+            a_or_b = (alice_or_bob[0] if alice_or_bob else "")
             current_suffix = str(suffix).format(
-                alice_or_bob=alice_or_bob, mode=mode, a_or_b=alice_or_bob[0]
+                alice_or_bob=alice_or_bob or "", mode=mode, a_or_b=a_or_b
             )
         else:
             current_suffix = str(suffix)
@@ -2286,10 +2266,19 @@ def analyze_t1(
             else:
                 current_settings[param_name] = settings
 
-        result = fit_t1(time, y, custom_settings=current_settings)
+        try:
+            result = fit_t1(time, y, custom_settings=current_settings)
+            t1_val = result.params["T1"].value
+            t1_err = result.params["T1"].stderr or 0.0
+            is_valid, status_code, metrics = validate_fit_quality(time, y, result, fit_type="t1")
+        except Exception as e:
+            print(f"T1 fit failed for file {filenum}: {e}")
+            result = None
+            t1_val, t1_err = np.nan, 0.0
+            is_valid, status_code, metrics = False, "WARNING_FIT_CRASHED", {"reason": str(e)}
 
-        t1_val = result.params["T1"].value
-        t1_err = result.params["T1"].stderr or 0.0
+        if not is_valid:
+            print(f"  [FIT INVALID] File {filenum} ({current_suffix}) T1 validation failed: {metrics.get('reason')} (Status: {status_code})")
 
         results.append(
             {
@@ -2299,6 +2288,8 @@ def analyze_t1(
                 "flux": flux,
                 "t1": t1_val,
                 "t1_err": t1_err,
+                "fit_status": status_code,
+                "fit_valid": is_valid,
                 "fit_result": result,
                 "x_raw": time,
                 "y_raw": y,
@@ -2311,53 +2302,65 @@ def analyze_t1(
             y,
             marker="o",
             linestyle="",
-            color=c,
-            markerfacecolor=fcolor,
-            markeredgecolor=c,
+            color=c if is_valid else "#c62828",
+            markerfacecolor=fcolor if is_valid else "#ffebee",
+            markeredgecolor=c if is_valid else "#c62828",
             ms=8,
             label="Data",
         )
 
-        time_fine = np.linspace(time.min(), time.max(), 1000)
-        fit_fine = result.eval(t=time_fine)
+        if result is not None:
+            time_fine = np.linspace(time.min(), time.max(), 1000)
+            fit_fine = result.eval(t=time_fine)
 
-        try:
-            model_error = result.eval_uncertainty(t=time_fine, sigma=1)
-            residual_noise = np.std(result.residual)
-            prediction_error = np.sqrt(model_error**2 + residual_noise**2)
-            ax.fill_between(
+            try:
+                model_error = result.eval_uncertainty(t=time_fine, sigma=1)
+                residual_noise = np.std(result.residual)
+                prediction_error = np.sqrt(model_error**2 + residual_noise**2)
+                ax.fill_between(
+                    time_fine,
+                    fit_fine - prediction_error,
+                    fit_fine + prediction_error,
+                    color=c if is_valid else "#ef5350",
+                    alpha=0.15,
+                    edgecolor="none",
+                    label="Prediction Band",
+                )
+            except Exception:
+                pass
+
+            ax.plot(
                 time_fine,
-                fit_fine - prediction_error,
-                fit_fine + prediction_error,
-                color=c,
-                alpha=0.15,
-                edgecolor="none",
-                label="Prediction Band",
+                fit_fine,
+                c=c if is_valid else "#c62828",
+                linestyle="-" if is_valid else "--",
+                label=rf"$T_1 = {format_err(t1_val, t1_err)}\ \mu s$",
             )
-        except Exception:
-            pass
 
-        ax.plot(
-            time_fine,
-            fit_fine,
-            c=c,
-            linestyle="-",
-            label=rf"$T_1 = {format_err(t1_val, t1_err)}\ \mu s$",
-        )
+            if not np.isnan(t1_val) and t1_val > 0:
+                ax.axvline(t1_val, linestyle="--", color=c if is_valid else "#c62828")
+                if t1_err > 0 and not np.isnan(t1_err) and t1_err < 5 * t1_val:
+                    ax.axvspan(max(time.min(), t1_val - t1_err), min(time.max(), t1_val + t1_err), color=c if is_valid else "#c62828", alpha=0.18)
 
-        ax.axvline(t1_val, linestyle="--", color=c)
-
-        info_text = (
-            f"Current = {current * 1e3:.3f} mA\n"
-            rf"Flux = {flux:.3f} $\Phi_0$"
-        )
+        info_lines = []
+        if not is_valid:
+            info_lines.append(rf"$\bf{{[INVALID:\ {status_code}]}}$")
+            reason_short = metrics.get("reason", "")
+            if reason_short and len(reason_short) < 40:
+                info_lines.append(rf"$\it{{{reason_short}}}$")
+        info_lines.append(rf"$T_1 = {format_err(t1_val, t1_err)}\ \mu$s")
+        info_lines.append(rf"Flux = {flux:.3f} $\Phi_0$")
+        red_chi2 = getattr(result, "redchi", np.nan) if result else np.nan
+        if not np.isnan(red_chi2):
+            info_lines.append(rf"$\chi^2_{{\rm red}} = {red_chi2:.2f}$")
+        info_text = "\n".join(info_lines)
 
         props = dict(
             boxstyle="round",
-            facecolor="white",
-            alpha=0.8,
-            edgecolor="lightgray",
-            linewidth=1,
+            facecolor="#ffebee" if not is_valid else "white",
+            alpha=0.88,
+            edgecolor="#d32f2f" if not is_valid else "lightgray",
+            linewidth=1.8 if not is_valid else 1.0,
         )
         ax.text(
             0.95,
@@ -2371,15 +2374,20 @@ def analyze_t1(
         )
 
         ax.set(xlabel=r"t ($\mu s$)", ylabel="$P_e$")
-        ax.set_xlim(-time.max() * 0.1, time.max() * 1.1)
-
-        axtitle = (f"Storage {mode}" if mode != 0 else "SNAIL") + f", file {filenum}"
-        ax.legend(fontsize="small", title=axtitle, loc="center right")
+        ax.set_title(f"File {filenum}", fontsize="small")
 
     for idx in range(len(tasks), len(axs)):
-        fig.delaxes(axs[idx])
+        axs[idx].set_visible(False)
 
-    fig.suptitle(f"T1 {alice_or_bob.capitalize()}", y=1.02, fontsize=32)
+    if alice_or_bob in ["alice", "bob"]:
+        sup_str = f"Buffer T1 ({alice_or_bob.capitalize()})"
+    elif any(m in ["alice", "bob"] for _, m in tasks if m):
+        sup_str = "Buffer T1"
+    elif any(m is not None and not (isinstance(m, float) and np.isnan(m)) for _, m in tasks):
+        sup_str = f"T1 ({current_suffix})"
+    else:
+        sup_str = "Transmon T1"
+    fig.suptitle(sup_str, y=1.02, fontsize=16)
     plt.tight_layout()
 
     return pd.DataFrame(results), fig
@@ -2396,28 +2404,40 @@ def fit_ramsey(t, y, is_echo=False, custom_settings=None):
     model = Model(ramsey_decay_func)
     params = model.make_params()
 
-    rough_A = (np.max(y) - np.min(y)) / 2.0
+    t_span = max(float(np.ptp(t)), 1.0) if len(t) > 0 else 1.0
+    rough_A = float(np.ptp(y) / 2.0)
     if len(y) > 0 and y[0] < np.mean(y):
         rough_A = -rough_A
-    rough_B = np.mean(y)
-    rough_T2 = np.mean(t) if len(t) > 0 else 1.0
+    rough_B = float(np.mean(y))
+    rough_T2 = float(max(t_span / 2.0, 1.0))
 
-    params["A"].set(value=rough_A, min=-2.0, max=2.0)
-    params["T2"].set(value=rough_T2, min=0.001, max=1000)
-    params["B"].set(value=rough_B, min=-1.0, max=1.0)
-
-    # guess f from FFT or just set a standard bound
+    # Guess frequency from FFT with uniform resampling if needed
+    guess_f = 0.001
     n = len(t)
-    if n > 3:
-        dt = t[1] - t[0] if n > 1 else 1.0
-        freqs = np.fft.rfftfreq(n, d=dt)
-        fft_vals = np.abs(np.fft.rfft(y - np.mean(y)))
-        guess_f = freqs[np.argmax(fft_vals)]
-        if guess_f == 0:
-            guess_f = 1 / (t[-1] - t[0])
+    dt = float(np.mean(np.diff(t))) if n > 1 else 1.0
+    if n > 4:
+        try:
+            t_interp = np.linspace(t.min(), t.max(), len(t) * 2)
+            y_interp = np.interp(t_interp, t, y - np.mean(y))
+            dt_interp = float(t_interp[1] - t_interp[0])
+            freqs = np.fft.rfftfreq(len(t_interp), d=dt_interp)
+            fft_vals = np.abs(np.fft.rfft(y_interp))
+            if len(freqs) > 1:
+                # ignore DC bin
+                best_idx = 1 + np.argmax(fft_vals[1:])
+                guess_f = float(freqs[best_idx])
+        except Exception:
+            guess_f = 1.0 / t_span
+
+    if is_echo:
+        guess_f = 0.0
+        params["f"].set(value=0.0, vary=False)
     else:
-        guess_f = 0.1
-    params["f"].set(value=guess_f, min=0.0)
+        params["f"].set(value=guess_f, min=0.0, max=max(50.0 / dt if dt > 0 else 100.0, 10.0))
+
+    params["A"].set(value=rough_A, min=-2.5, max=2.5)
+    params["T2"].set(value=rough_T2, min=0.01, max=max(50.0 * t_span, 1e6))
+    params["B"].set(value=rough_B, min=-0.5, max=1.5)
     params["phi"].set(value=0.0, min=-np.pi, max=np.pi)
 
     if custom_settings:
@@ -2431,11 +2451,13 @@ def analyze_ramsey(
     filenums,
     modes,
     data_path,
-    alice_or_bob="alice",
+    alice_or_bob=None,
     suffix=None,
     global_overrides=None,
     fit_overrides=None,
     is_echo=False,
+    fig=None,
+    ax=None,
 ):
     if fit_overrides is None:
         fit_overrides = {}
@@ -2444,8 +2466,11 @@ def analyze_ramsey(
     n = len(tasks)
     ncols = int(np.ceil(np.sqrt(n)))
     nrows = int(np.ceil(n / ncols)) if ncols > 0 else 1
-    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
-    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
     axs = axs.flatten()
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n // 5 + 1)
 
@@ -2454,12 +2479,14 @@ def analyze_ramsey(
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
 
+        seq_str = "echo" if is_echo else "ramsey"
         if suffix is None:
-            seq_str = "echo" if is_echo else "ramsey"
-            current_suffix = f"bs_{alice_or_bob[0]}{mode}_{seq_str}"
+            a_or_b = (alice_or_bob[0] if alice_or_bob else "a")
+            current_suffix = f"bs_{a_or_b}{mode}_{seq_str}"
         elif "{" in str(suffix):
+            a_or_b = (alice_or_bob[0] if alice_or_bob else "")
             current_suffix = str(suffix).format(
-                alice_or_bob=alice_or_bob, mode=mode, a_or_b=alice_or_bob[0]
+                alice_or_bob=alice_or_bob or "", mode=mode, a_or_b=a_or_b
             )
         else:
             current_suffix = str(suffix)
@@ -2503,13 +2530,21 @@ def analyze_ramsey(
             else:
                 current_settings[param_name] = settings
 
-        result = fit_ramsey(time, y, is_echo=is_echo, custom_settings=current_settings)
+        try:
+            result = fit_ramsey(time, y, is_echo=is_echo, custom_settings=current_settings)
+            t2_val = result.params["T2"].value
+            t2_err = result.params["T2"].stderr or 0.0
+            f_val = result.params["f"].value
+            f_err = result.params["f"].stderr or 0.0
+            is_valid, status_code, metrics = validate_fit_quality(time, y, result, fit_type="ramsey")
+        except Exception as e:
+            print(f"Ramsey fit failed for file {filenum}, mode {mode}: {e}")
+            result = None
+            t2_val, t2_err, f_val, f_err = np.nan, 0.0, np.nan, 0.0
+            is_valid, status_code, metrics = False, "WARNING_FIT_CRASHED", {"reason": str(e)}
 
-        t2_val = result.params["T2"].value
-        t2_err = result.params["T2"].stderr or 0.0
-
-        f_val = result.params["f"].value
-        f_err = result.params["f"].stderr or 0.0
+        if not is_valid:
+            print(f"  [FIT INVALID] File {filenum} ({current_suffix}) Ramsey validation failed: {metrics.get('reason')} (Status: {status_code})")
 
         results.append(
             {
@@ -2521,6 +2556,8 @@ def analyze_ramsey(
                 "t2_err": t2_err,
                 "f": f_val,
                 "f_err": f_err,
+                "fit_status": status_code,
+                "fit_valid": is_valid,
                 "fit_result": result,
                 "x_raw": time,
                 "y_raw": y,
@@ -2533,55 +2570,75 @@ def analyze_ramsey(
             y,
             marker="o",
             linestyle="",
-            color=c,
-            markerfacecolor=fcolor,
-            markeredgecolor=c,
+            color=c if is_valid else "#c62828",
+            markerfacecolor=fcolor if is_valid else "#ffebee",
+            markeredgecolor=c if is_valid else "#c62828",
             ms=8,
             label="Data",
         )
 
-        time_fine = np.linspace(time.min(), time.max(), 1000)
-        fit_fine = result.eval(t=time_fine)
+        if result is not None:
+            time_fine = np.linspace(time.min(), time.max(), 1000)
+            fit_fine = result.eval(t=time_fine)
 
-        try:
-            model_error = result.eval_uncertainty(t=time_fine, sigma=1)
-            residual_noise = np.std(result.residual)
-            prediction_error = np.sqrt(model_error**2 + residual_noise**2)
-            ax.fill_between(
-                time_fine,
-                fit_fine - prediction_error,
-                fit_fine + prediction_error,
-                color=c,
-                alpha=0.15,
-                edgecolor="none",
-                label="Prediction Band",
+            try:
+                model_error = result.eval_uncertainty(t=time_fine, sigma=1)
+                residual_noise = np.std(result.residual)
+                prediction_error = np.sqrt(model_error**2 + residual_noise**2)
+                ax.fill_between(
+                    time_fine,
+                    fit_fine - prediction_error,
+                    fit_fine + prediction_error,
+                    color=c if is_valid else "#ef5350",
+                    alpha=0.15,
+                    edgecolor="none",
+                    label="Prediction Band",
+                )
+            except Exception:
+                pass
+
+            lbl = (
+                rf"$T_2^* = {format_err(t2_val, t2_err)}\ \mu s$"
+                if not is_echo
+                else rf"$T_2 = {format_err(t2_val, t2_err)}\ \mu s$"
             )
-        except Exception:
-            pass
+            if not is_echo:
+                lbl += "\n" + rf"$f = {format_err(f_val, f_err)}$ MHz"
 
-        label_str = (
-            rf"$T_2^* = {format_err(t2_val, t2_err)}\ \mu s$"
-            if not is_echo
-            else rf"$T_{{2,E}} = {format_err(t2_val, t2_err)}\ \mu s$"
-        )
-        if not is_echo:
-            label_str += "\n" + rf"$f = {format_err(f_val, f_err)}$ MHz"
+            ax.plot(time_fine, fit_fine, c=c if is_valid else "#c62828", linestyle="-" if is_valid else "--", label=lbl)
 
-        ax.plot(time_fine, fit_fine, c=c, linestyle="-", label=label_str)
+            if not np.isnan(t2_val) and t2_val > 0:
+                ax.axvline(t2_val, linestyle="--", color=c if is_valid else "#c62828")
+                if t2_err > 0 and not np.isnan(t2_err) and t2_err < 5 * t2_val:
+                    ax.axvspan(max(time.min(), t2_val - t2_err), min(time.max(), t2_val + t2_err), color=c if is_valid else "#c62828", alpha=0.18)
+        else:
+            ax.text(
+                0.5, 0.5, "Fit Failed", transform=ax.transAxes,
+                ha="center", va="center", color="red", alpha=0.5, fontsize=12,
+                rotation=30
+            )
 
-        ax.axvline(t2_val, linestyle="--", color=c)
-
-        info_text = (
-            f"Current = {current * 1e3:.3f} mA\n"
-            rf"Flux = {flux:.3f} $\Phi_0$"
-        )
+        info_lines = []
+        if not is_valid:
+            info_lines.append(rf"$\bf{{[INVALID:\ {status_code}]}}$")
+            reason_short = metrics.get("reason", "")
+            if reason_short and len(reason_short) < 40:
+                info_lines.append(rf"$\it{{{reason_short}}}$")
+        info_lines.extend([
+            f"Current = {current * 1e3:.3f} mA",
+            rf"Flux = {flux:.3f} $\Phi_0$",
+        ])
+        red_chi2 = getattr(result, "redchi", np.nan) if result else np.nan
+        if not np.isnan(red_chi2):
+            info_lines.append(rf"$\chi^2_{{\rm red}} = {red_chi2:.2f}$")
+        info_text = "\n".join(info_lines)
 
         props = dict(
             boxstyle="round",
-            facecolor="white",
-            alpha=0.8,
-            edgecolor="lightgray",
-            linewidth=1,
+            facecolor="#ffebee" if not is_valid else "white",
+            alpha=0.88,
+            edgecolor="#d32f2f" if not is_valid else "lightgray",
+            linewidth=1.8 if not is_valid else 1.0,
         )
         ax.text(
             0.95,
@@ -2597,14 +2654,31 @@ def analyze_ramsey(
         ax.set(xlabel=r"t ($\mu s$)", ylabel="$P_e$")
         ax.set_xlim(-time.max() * 0.1, time.max() * 1.1)
 
-        axtitle = (f"Storage {mode}" if mode != 0 else "SNAIL") + f", file {filenum}"
+        if mode in ["alice", "bob"]:
+            axtitle = f"Buffer ({mode}), file {filenum}"
+        elif mode is not None and not (isinstance(mode, float) and np.isnan(mode)):
+            axtitle = (f"Storage {mode}" if mode != 0 else "SNAIL") + f", file {filenum}"
+        elif "ef" in str(current_suffix):
+            axtitle = f"Qubit e-f, file {filenum}"
+        else:
+            axtitle = f"Transmon, file {filenum}"
         ax.legend(fontsize="small", title=axtitle, loc="upper right")
 
     for idx in range(len(tasks), len(axs)):
-        fig.delaxes(axs[idx])
+        axs[idx].set_visible(False)
 
     title_prefix = "Echo" if is_echo else "Ramsey"
-    fig.suptitle(f"{title_prefix} {alice_or_bob.capitalize()}", y=1.02, fontsize=32)
+    if alice_or_bob in ["alice", "bob"]:
+        sup_str = f"Buffer {title_prefix} ({alice_or_bob.capitalize()})"
+    elif any(m in ["alice", "bob"] for _, m in tasks if m):
+        sup_str = f"Buffer {title_prefix}"
+    elif any(m is not None and not (isinstance(m, float) and np.isnan(m)) for _, m in tasks):
+        sup_str = f"{title_prefix} ({current_suffix})"
+    elif "ef" in str(current_suffix):
+        sup_str = f"Qubit e-f {title_prefix}"
+    else:
+        sup_str = f"Transmon {title_prefix}"
+    fig.suptitle(sup_str, y=1.02, fontsize=16)
     plt.tight_layout()
 
     return pd.DataFrame(results), fig
@@ -2747,3 +2821,264 @@ def save_plot(fname, fig=None, data_files=None, **kwargs):
 
     kwargs["metadata"] = metadata
     fig.savefig(fname, **kwargs)
+
+
+# =============================================================================
+# GENERIC SPECTROSCOPY ORCHESTRATOR
+# =============================================================================
+def analyze_spectroscopy(
+    filenums,
+    modes,
+    data_path,
+    suffix,
+    fit_type="lorentzian",
+    pulse_length=None,
+    global_overrides=None,
+    fit_overrides=None,
+    fig=None,
+    ax=None,
+    title=None,
+):
+    if fit_overrides is None:
+        fit_overrides = {}
+    tasks = list(zip(filenums, modes))
+    n_files = len(tasks)
+    ncols = int(np.ceil(np.sqrt(n_files)))
+    nrows = int(np.ceil(n_files / ncols)) if ncols > 0 else 1
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
+    axs = axs.flatten()
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n_files // 5 + 1)
+    results = []
+
+    for ii, (filenum, mode) in enumerate(tasks):
+        ax, c = axs[ii], colors[ii]
+        try:
+            data = LabData(data_path, filenum=filenum, suffix=suffix)
+        except FileNotFoundError:
+            ax.axis("off")
+            continue
+        freq = data.xpts / 1e9 if data.xpts.max() > 1e6 else data.xpts
+        y = data.P_e
+        current = data.exp.get("flux_current", 0)
+        flux = data.q0.get("flux", 0.0)
+
+        current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
+        specific_overrides = fit_overrides.get((filenum, mode), {})
+        for param_name, settings in specific_overrides.items():
+            if param_name in current_settings:
+                current_settings[param_name].update(settings)
+            else:
+                current_settings[param_name] = settings
+
+        if fit_type == "flattop":
+            p_len = pulse_length if pulse_length is not None else 2.0
+            result = fit_flattop_spectroscopy(freq, y, pulse_length=p_len, custom_settings=current_settings)
+            center = result.params["nu_bs"].value
+            center_err = result.params["nu_bs"].stderr or 0.0
+            width = result.params["width"].value
+            fwhm = result.params["fwhm"].value
+        else:
+            result = fit_lorentzian_spectroscopy(freq, y, custom_settings=current_settings)
+            center = result.params["center"].value
+            center_err = result.params["center"].stderr or 0.0
+            fwhm = result.params["fwhm"].value
+            width = fwhm
+
+        results.append({
+            "filenum": filenum, "mode": mode, "current": current, "flux": flux,
+            "center": center, "center_err": center_err,
+            "width": width, "fwhm": fwhm,
+            "fit_result": result, "x_raw": freq, "y_raw": y
+        })
+
+        fcolor = to_rgba(c, alpha=0.25)
+        ax.plot(freq, y, marker="o", linestyle="", color=c, markerfacecolor=fcolor, markeredgecolor=c, ms=8)
+        freq_fine = np.linspace(freq.min(), freq.max(), 1000)
+        fit_fine = result.eval(x=freq_fine)
+        ax.plot(freq_fine, fit_fine, c=c, linestyle="-")
+        ax.axvline(center, linestyle="--", color=c)
+        if center_err > 0 and not np.isnan(center_err):
+            ax.axvspan(max(freq.min(), center - center_err), min(freq.max(), center + center_err), color=c, alpha=0.18)
+        info_text = f"Center = {center:.4f} GHz\nFlux = {flux:.3f} $\\Phi_0$"
+        ax.text(0.05, 0.05, info_text, transform=ax.transAxes, fontsize="x-small", verticalalignment="bottom", bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="lightgray"))
+        ax.set(xlabel="Frequency (GHz)", ylabel="$P_e$")
+        ax.set_title(f"File {filenum}", fontsize="small")
+
+    for idx in range(len(tasks), len(axs)): axs[idx].set_visible(False)
+    if fig is None or ax is None:
+        sup_str = title if title is not None else f"Spectroscopy ({suffix})"
+        fig.suptitle(sup_str, y=1.02)
+        plt.tight_layout()
+    return pd.DataFrame(results), fig
+
+# =============================================================================
+# GENERIC RABI ORCHESTRATOR
+# =============================================================================
+def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overrides=None, fit_overrides=None, fig=None, ax=None, raise_on_failure=True, title=None, **kwargs):
+    if fit_overrides is None: fit_overrides = {}
+    tasks = list(zip(filenums, modes))
+    n_files = len(tasks)
+    ncols = int(np.ceil(np.sqrt(n_files)))
+    nrows = int(np.ceil(n_files / ncols)) if ncols > 0 else 1
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
+    axs = axs.flatten()
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n_files // 5 + 1)
+    results = []
+
+    for ii, (filenum, mode) in enumerate(tasks):
+        ax, c = axs[ii], colors[ii]
+        try:
+            data = LabData(data_path, filenum=filenum, suffix=suffix)
+        except FileNotFoundError:
+            ax.axis("off")
+            continue
+        t = data.xpts * 1e6 if data.xpts.max() < 1e-3 else data.xpts
+        y = data.P_e
+        current = data.exp.get("flux_current", 0)
+        flux = data.q0.get("flux", 0.0)
+        
+        current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
+        specific_overrides = fit_overrides.get((filenum, mode), {})
+        for param_name, settings in specific_overrides.items():
+            if param_name in current_settings: current_settings[param_name].update(settings)
+            else: current_settings[param_name] = settings
+            
+        raw_pi_guess = kwargs.get("pi_time_guess", pi_guess)
+        current_pi_guess = raw_pi_guess(data) if callable(raw_pi_guess) else raw_pi_guess
+        if current_pi_guess is None:
+            current_pi_guess = 0.1
+        elif current_pi_guess < 1e-3:
+            current_pi_guess = current_pi_guess * 1e6
+
+        try:
+            result = fit_rabi(t, y, pi_guess=current_pi_guess, custom_settings=current_settings)
+            gbs = result.params["gbs"].value
+            gbs_err = result.params["gbs"].stderr or 0.0
+            pi_time = np.pi / (2 * gbs) if gbs != 0 else np.nan
+            pi_time_err = pi_time * (gbs_err / gbs) if gbs != 0 else 0.0
+        except Exception as e:
+            print(f"Fit failed for file {filenum}: {e}")
+            result = None
+            pi_time, pi_time_err = np.nan, 0.0
+
+        is_valid, status_code, metrics = validate_fit_quality(t, y, result, fit_type="rabi")
+        if not is_valid:
+            msg = f"Rabi File {filenum} ({suffix}) fit validation failed: {metrics.get('reason')} (Status: {status_code})"
+            send_notification(msg, title="Rabi Fit Quality Warning", config=None, is_critical=True)
+            if raise_on_failure:
+                raise CalibrationError(msg)
+
+        rabi_freq = 1.0 / (2.0 * pi_time) if (pi_time and not np.isnan(pi_time) and pi_time != 0) else np.nan
+        results.append({
+            "filenum": filenum, "mode": mode, "current": current, "flux": flux,
+            "pi_time": pi_time, "pi_time_err": pi_time_err, "rabi_freq": rabi_freq,
+            "fit_result": result, "x_raw": t, "y_raw": y,
+            "fit_status": status_code, "fit_valid": is_valid,
+        })
+
+        fcolor = to_rgba(c, alpha=0.25)
+        ax.plot(t, y, marker="o", linestyle="", color=c, markerfacecolor=fcolor, markeredgecolor=c, ms=8, label="Data")
+        if result is not None:
+            t_fine = np.linspace(t.min(), t.max(), 1000)
+            fit_fine = result.eval(t=t_fine)
+            try:
+                model_err = result.eval_uncertainty(t=t_fine, sigma=1)
+                ax.fill_between(t_fine, fit_fine - model_err, fit_fine + model_err, color=c, alpha=0.15)
+            except Exception:
+                pass
+            ax.plot(t_fine, fit_fine, c=c, linestyle="-", label="Fit")
+            
+        if not np.isnan(pi_time) and t.min() <= pi_time <= t.max():
+            ax.axvline(pi_time, linestyle="--", color=c, lw=1.5)
+            if pi_time_err > 0 and not np.isnan(pi_time_err):
+                ax.axvspan(max(t.min(), pi_time - pi_time_err), min(t.max(), pi_time + pi_time_err), color=c, alpha=0.18)
+                
+        if mode in ["alice", "bob"]:
+            mode_str = f"Buffer ({mode})"
+        elif mode is not None and not (isinstance(mode, float) and np.isnan(mode)):
+            mode_str = f"Storage {mode}" if mode != 0 else "SNAIL"
+        elif "ef" in str(suffix):
+            mode_str = "Qubit e-f"
+        else:
+            mode_str = "Qubit g-e"
+            
+        red_chi2 = getattr(result, "redchi", np.nan) if result else np.nan
+        info_lines = [
+            rf"$\tau_\pi = {format_err(pi_time, pi_time_err)}\ \mu$s" if pi_time < 1e3 else rf"$\tau_\pi = {pi_time:.3f}$",
+        ]
+        if not np.isnan(red_chi2):
+            info_lines.append(rf"$\chi^2_{{\rm red}} = {red_chi2:.2f}$")
+        info_lines.extend([
+            f"Status = {status_code}",
+            rf"Flux = {flux:.3f} $\Phi_0$",
+        ])
+        info_text = "\n".join(info_lines)
+        ax.text(0.95, 0.95, info_text, transform=ax.transAxes, fontsize="x-small", verticalalignment="top", horizontalalignment="right", bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="lightgray"))
+        xlbl = kwargs.get("xlabel", "Pulse Length or Amp")
+        ax.set(xlabel=xlbl, ylabel="$P_e$")
+        ax.set_title(f"File {filenum} ({mode_str} Rabi)", fontsize="small")
+        
+    for idx in range(len(tasks), len(axs)): axs[idx].set_visible(False)
+    if title is not None:
+        sup_str = title
+    elif any(m in ["alice", "bob"] for _, m in tasks if m):
+        sup_str = "Buffer Rabi"
+    elif any(m is not None and not (isinstance(m, float) and np.isnan(m)) for _, m in tasks):
+        sup_str = f"Beamsplitter Rabi ({suffix})"
+    elif "ef" in str(suffix):
+        sup_str = "Qubit e-f Rabi"
+    else:
+        sup_str = "Qubit g-e Rabi"
+    fig.suptitle(sup_str, y=1.02, fontsize=16)
+    plt.tight_layout()
+    return pd.DataFrame(results), fig
+
+
+# =============================================================================
+# Clean API Aliases
+# =============================================================================
+
+def analyze_bs_spectroscopy(*args, **kwargs):
+    """Alias for Beamsplitter Spectroscopy."""
+    kwargs.setdefault('title', "Beamsplitter Spectroscopy")
+    return analyze_flattop_spectroscopy(*args, **kwargs)
+
+def analyze_sb_spectroscopy(*args, **kwargs):
+    """Alias for Sideband Spectroscopy."""
+    kwargs.setdefault('title', "Sideband Spectroscopy")
+    return analyze_flattop_spectroscopy(*args, **kwargs)
+
+def analyze_transmon_spectroscopy(*args, **kwargs):
+    """Alias for Transmon Spectroscopy."""
+    kwargs.setdefault('title', "Transmon Spectroscopy")
+    kwargs.setdefault('fit_type', "lorentzian")
+    return analyze_spectroscopy(*args, **kwargs)
+
+def analyze_cavity_spectroscopy(*args, **kwargs):
+    """Alias for Cavity Spectroscopy."""
+    kwargs.setdefault('title', "Cavity Spectroscopy")
+    kwargs.setdefault('fit_type', "lorentzian")
+    return analyze_spectroscopy(*args, **kwargs)
+
+def analyze_bs_rabi(*args, **kwargs):
+    """Alias for Beamsplitter Rabi."""
+    kwargs.setdefault('title', "Beamsplitter Rabi")
+    return analyze_flattop_rabi(*args, **kwargs)
+
+def analyze_sb_rabi(*args, **kwargs):
+    """Alias for Sideband Rabi."""
+    kwargs.setdefault('title', "Sideband Rabi")
+    return analyze_flattop_rabi(*args, **kwargs)
+
+def analyze_transmon_rabi(*args, **kwargs):
+    """Alias for Transmon Rabi."""
+    kwargs.setdefault('title', "Transmon Rabi")
+    return analyze_rabi(*args, **kwargs)

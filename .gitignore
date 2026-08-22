@@ -1,6 +1,11 @@
 # Ignore the quarantine folder where questionable files are stored for review
 _quarantine/
 
+# local stuff
+local_data/
+scratch/
+temp.py
+
 # Standard Python ignores
 __pycache__/
 *.py[cod]
