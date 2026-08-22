@@ -1742,6 +1742,8 @@ def analyze_flattop_rabi(
             "filenum": filenum, "mode": mode, "current": current, "flux": flux,
             "pi_time": pi_time, "pi_time_err": pi_time_err, "freq": freq,
             "amp": amp, "drive_range": drive_range,
+            "t1": bs_t1, "t1_err": t1_err, "t2": bs_t2, "t2_err": t2_err,
+            "fidelity": bs_fidelity, "fidelity_err": bs_fidelity_err,
             "fit_result": result, "x_raw": time, "y_raw": y,
             "fit_status": status_code, "fit_valid": is_valid,
         })
@@ -1753,6 +1755,11 @@ def analyze_flattop_rabi(
         if result is not None:
             t_fine = np.linspace(t_fit.min(), t_fit.max(), 1000)
             fit_fine = result.eval(t=t_fine)
+            try:
+                model_err = result.eval_uncertainty(t=t_fine, sigma=1)
+                ax.fill_between(t_fine, fit_fine - model_err, fit_fine + model_err, color=c, alpha=0.15)
+            except Exception:
+                pass
             ax.plot(t_fine, fit_fine, c=c if is_valid else "#c62828", linestyle="-" if is_valid else "--")
             if not np.isnan(pi_time) and pi_time > 0:
                 ax.axvline(startfit + pi_time, linestyle="--", color=c if is_valid else "#c62828")
@@ -3041,6 +3048,352 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
     plt.tight_layout()
     return pd.DataFrame(results), fig
 
+
+    initial_nth = y[0] if len(y) > 0 else 0
+    sat_nth = np.mean(y[-3:]) if len(y) > 3 else (y[-1] if len(y) > 0 else 0.1)
+    rough_tau = np.mean(t) if len(t) > 0 else 1.0
+
+    params['nth_sat'].set(value=sat_nth, min=0)
+    params['tau'].set(value=rough_tau, min=1e-5)
+    params['B'].set(value=initial_nth, min=0)
+
+    # Apply fit overrides if specified
+    if custom_settings:
+        for param_name, settings in custom_settings.items():
+            if param_name in params:
+                params[param_name].set(**settings)
+
+    return model.fit(y, params, t=t)
+
+
+def load_bf_channel(file_paths, column_name):
+    """
+    Loads and concatenates Bluefors logs. 
+    Accepts a single file path, a list of file paths, or a glob pattern string.
+    """
+    if isinstance(file_paths, str):
+        file_paths = glob.glob(file_paths) if "*" in file_paths else [file_paths]
+    
+    dfs = []
+    for fp in file_paths:
+        try:
+            df = pd.read_csv(fp, names=["date_str", "time_str", column_name], header=None)
+            df["time"] = pd.to_datetime(df["date_str"] + df["time_str"], format="%d-%m-%y%H:%M:%S", errors="coerce")
+            dfs.append(df.dropna(subset=["time"]))
+        except Exception as e:
+            print(f"⚠️ Warning: Could not load '{fp}': {e}")
+            
+    if not dfs:
+        return None
+        
+    full_df = pd.concat(dfs, ignore_index=True)
+    return full_df.sort_values("time").drop_duplicates(subset=["time"])[["time", column_name]]
+
+# =============================================================================
+# ORCHESTRATOR
+# =============================================================================
+def analyze_bs_heating_population(
+    filenum_pairs,
+    heating_modes,
+    swap_modes,
+    data_path,
+    alice_or_bob_heating="alice",
+    alice_or_bob_swap="bob",
+    startfits=None,
+    buffer_freq_override=None,
+    plot_individual_rabis=False,
+    independent_rabi_scale=False,
+    global_overrides=None,
+    fit_overrides=None,
+    bf_logs=None,  
+    fig=None,
+    ax=None,
+    static_nths=None,
+):
+    """
+    Analyzes SNAIL thermal population via beamsplitter and Rabi measurements.
+    Optionally syncs Bluefors log temperature based on h5 file modification time.
+    """
+    import os
+    from datetime import datetime
+
+    if startfits is None:
+        startfits = [0] * len(filenum_pairs)
+    if fit_overrides is None:
+        fit_overrides = {}
+    if global_overrides is None:
+        global_overrides = {}
+
+    # --- Pre-load Bluefors Log(s) ---
+    df_bf = None
+    if bf_logs is not None:
+        if isinstance(bf_logs, dict):
+            for channel_name, file_path in bf_logs.items():
+                df_channel = load_bf_channel(file_path, column_name=channel_name)
+                if df_bf is None:
+                    df_bf = df_channel
+                else:
+                    df_bf = pd.merge(df_bf, df_channel, on='time', how='outer')
+            df_bf = df_bf.sort_values('time').reset_index(drop=True)
+        elif isinstance(bf_logs, (str, list)):
+            df_bf = load_bf_channel(bf_logs, column_name='mxc_temp')
+
+    tasks = list(zip(filenum_pairs, heating_modes, swap_modes, startfits))
+    n = len(tasks)
+    ncols = int(np.ceil(np.sqrt(n)))
+    nrows = int(np.ceil(n / ncols)) if ncols > 0 else 1
+
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n // 5 + 1)
+
+    results = []
+    rabi_figs = []
+
+    # Extract global overrides
+    g_bs, g_bs_cold, g_bs_hot, g_sat = _extract_fit_configs(global_overrides)
+
+    for ii, (item, h_mode, s_mode, startfit) in enumerate(tasks):
+        ax_main, c = axs[ii], colors[ii]
+        suffix = f"heating_{h_mode}_swap_{s_mode}"
+        
+        # Detect if we have a single pair [7,8] or a group of pairs [[7,8], [9,10]]
+        if isinstance(item[0], (int, np.integer)):
+            file_groups = [item] 
+        else:
+            file_groups = item 
+
+        # Use the first pair in the group for dictionary lookups and metadata
+        primary_filenums = file_groups[0]
+        task_key = tuple(primary_filenums)
+
+        task_override = (
+            fit_overrides.get(task_key)
+            or fit_overrides.get(primary_filenums[0])
+            or fit_overrides.get((h_mode, s_mode), {})
+        )
+        t_bs, t_bs_cold, t_bs_hot, t_sat = _extract_fit_configs(task_override)
+
+        dataset_sat_settings = _merge_param_dicts(g_sat, t_sat)
+        dataset_bs_settings = _merge_param_dicts(g_bs, t_bs)
+        dataset_bs_cold = _merge_param_dicts(_merge_param_dicts(g_bs, g_bs_cold), _merge_param_dicts(t_bs, t_bs_cold))
+        dataset_bs_hot = _merge_param_dicts(_merge_param_dicts(g_bs, g_bs_hot), _merge_param_dicts(t_bs, t_bs_hot))
+
+        # Combined lists for the saturation fit
+        combined_heating_times = []
+        combined_nths = []
+        combined_rabi_fits_cold = []
+        combined_rabi_fits_hot = []
+        combined_contrasts_cold = []
+        combined_contrasts_hot = []
+        
+        h5_time = pd.NaT
+        buffer_freq = buffer_freq_override
+
+        for g_idx, filenums in enumerate(file_groups):
+            try:
+                data0 = LabData(data_path, filenum=filenums[0], suffix=suffix)
+                data1 = LabData(data_path, filenum=filenums[1], suffix=suffix)
+            except FileNotFoundError:
+                print(f"Files {filenums} Not Found")
+                continue
+
+            # Grab timestamp and buffer freq only from the very first file in the group
+            if g_idx == len(file_groups) - 1:
+                try:
+                    file_path = getattr(data1, 'filepath', os.path.join(data_path, f"{str(filenums[1]).zfill(5)}_{suffix}.h5"))
+                    file_timestamp = os.path.getmtime(file_path)
+                    h5_time = datetime.fromtimestamp(file_timestamp)
+                except Exception as exceptionname:
+                    print(exceptionname)
+
+                if buffer_freq_override is None:
+                    buffer_freq = data0.q0.get(f"cav_{alice_or_bob_swap}_freq")
+                    if buffer_freq is None:
+                        print(f"⚠️ Warning (Files {filenums}): 'cav_{alice_or_bob_swap}_freq' not found in config. Using 0 Hz.")
+                        buffer_freq = 0
+
+                storage_mode = int(h_mode[1])
+                heating_buffer_a_or_b = h_mode[0]
+                heating_buffer = 'alice' if heating_buffer_a_or_b == 'a' else 'bob'
+                bs_freq = data0.q0.get(f'bs_{heating_buffer}_freqs')[storage_mode]
+
+            heating_times = data0.ypts * 1e6
+            time = data0.xpts * 1e6
+
+            if plot_individual_rabis:
+                n_sweeps = len(heating_times)
+                r_cols = 4
+                r_rows = int(np.ceil(n_sweeps / r_cols))
+                rabi_fig, rabi_axs = plt.subplots(r_rows, r_cols, figsize=(4 * r_cols, 3 * r_rows))
+                rabi_axs = np.atleast_1d(rabi_axs).flatten()
+                rabi_fig.suptitle(f"Rabi Sweeps - Files {filenums} (Mode {h_mode})", y=1.02)
+            else:
+                rabi_fig, rabi_axs = None, None
+
+            for sweep_idx in range(len(heating_times)):
+                y0 = data0.P_e[sweep_idx] if hasattr(data0, 'P_e') else data0.I[sweep_idx]
+                y1 = data1.P_e[sweep_idx] if hasattr(data1, 'P_e') else data1.I[sweep_idx]
+
+                sweep_override = {}
+                if "sweeps" in task_override and sweep_idx in task_override["sweeps"]:
+                    sweep_override = task_override["sweeps"][sweep_idx]
+                elif (task_key, sweep_idx) in fit_overrides:
+                    sweep_override = fit_overrides[(task_key, sweep_idx)]
+
+                sw_bs, sw_cold, sw_hot, _ = _extract_fit_configs(sweep_override)
+
+                final_bs_cold = _merge_param_dicts(_merge_param_dicts(dataset_bs_cold, sw_bs), sw_cold)
+                final_bs_hot = _merge_param_dicts(_merge_param_dicts(dataset_bs_hot, sw_bs), sw_hot)
+
+                res0 = fit_bs_contrast(time, y0, startfit, custom_settings=final_bs_cold)
+                contrast0 = abs(res0.params["A"].value)
+                fixed_gbs = res0.params["gbs"].value
+
+                res1 = fit_bs_contrast(time, y1, startfit, fixed_gbs=fixed_gbs, custom_settings=final_bs_hot)
+                contrast1 = abs(res1.params["A"].value)
+
+                combined_rabi_fits_cold.append(res0)
+                combined_rabi_fits_hot.append(res1)
+                combined_contrasts_cold.append(contrast0)
+                combined_contrasts_hot.append(contrast1)
+
+                if plot_individual_rabis and rabi_axs is not None:
+                    rax = rabi_axs[sweep_idx]
+                    t_fine = np.linspace(time.min(), time.max(), 500)
+
+                    c0 = plt.rcParams["axes.prop_cycle"].by_key()["color"][0]
+                    c1 = plt.rcParams["axes.prop_cycle"].by_key()["color"][1]
+
+                    fit0 = res0.eval(t=t_fine)
+                    rax.plot(time, y0, 'o', color=c0, alpha=0.5, ms=4)
+                    rax.plot(t_fine, fit0, '-', color=c0, label=f"Cold C={contrast0:.3f}")
+
+                    fit1 = res1.eval(t=t_fine)
+                    if independent_rabi_scale:
+                        rax_hot = rax.twinx()
+                        rax.tick_params(axis='y', colors=c0)
+                        rax_hot.tick_params(axis='y', colors=c1)
+                        rax_hot.spines['left'].set_color(c0)
+                        rax_hot.spines['right'].set_color(c1)
+                    else:
+                        rax_hot = rax
+
+                    rax_hot.plot(time, y1, 's', color=c1, alpha=0.5, ms=4)
+                    rax_hot.plot(t_fine, fit1, '-', color=c1, label=f"Hot C={contrast1:.3f}")
+
+                    if independent_rabi_scale:
+                        y0_ptp = np.ptp(y0) if np.ptp(y0) > 0 else 1
+                        rax.set_ylim(np.min(y0) - 0.1 * y0_ptp, np.max(y0) + 0.1 * y0_ptp)
+                        y1_ptp = np.ptp(y1) if np.ptp(y1) > 0 else 1
+                        rax_hot.set_ylim(np.min(y1) - 0.1 * y1_ptp, np.max(y1) + 0.1 * y1_ptp)
+                        lines, labels = rax.get_legend_handles_labels()
+                        lines2, labels2 = rax_hot.get_legend_handles_labels()
+                        rax_hot.legend(lines + lines2, labels + labels2, fontsize="x-small", loc="best")
+                    else:
+                        y_all = np.concatenate([y0, y1])
+                        y_ptp = np.ptp(y_all) if np.ptp(y_all) > 0 else 1
+                        rax.set_ylim(np.min(y_all) - 0.1 * y_ptp, np.max(y_all) + 0.1 * y_ptp)
+                        rax.legend(fontsize="x-small", loc="best")
+
+                    rax.set_title(f"t_heat = {heating_times[sweep_idx]:.2f} µs", fontsize="small")
+
+                ratio = contrast1 / contrast0
+                temp = temperature_q(buffer_freq, ratio)
+                nth = occupation_r(buffer_freq, temp)
+                
+                combined_heating_times.append(heating_times[sweep_idx])
+                combined_nths.append(nth)
+
+            if plot_individual_rabis:
+                for idx in range(len(heating_times), len(rabi_axs)):
+                    rabi_fig.delaxes(rabi_axs[idx])
+                rabi_fig.tight_layout()
+                rabi_figs.append(rabi_fig)
+
+        # Skip fitting if no data was found
+        if not combined_heating_times:
+            ax_main.text(0.5, 0.5, "No Data Found", ha="center", va="center")
+            ax_main.axis("off")
+            continue
+
+        # --- PERFORM THE COMBINED FIT ---
+        combined_heating_times = np.asarray(combined_heating_times)
+        combined_nths = np.asarray(combined_nths)
+        
+        # Sort by heating time in case data files were provided out of order
+        sort_idx = np.argsort(combined_heating_times)
+        combined_heating_times = combined_heating_times[sort_idx]
+        combined_nths = combined_nths[sort_idx]
+
+        if static_nths is not None and static_nths[ii] is not None:
+            combined_heating_times = np.r_[0, combined_heating_times]
+            combined_nths = np.r_[static_nths[ii], combined_nths]
+
+        res_sat = fit_heating_saturation(combined_heating_times, combined_nths, custom_settings=dataset_sat_settings)
+        tau = res_sat.params["tau"].value
+        nth_sat = res_sat.params["nth_sat"].value
+        
+
+        results.append({
+            "filenums": primary_filenums, # Logs under the primary file pair
+            "heating_mode": h_mode,
+            "swap_mode": s_mode,
+            "time": h5_time,
+            "tau": tau,
+            "nth_sat": nth_sat,
+            "buffer_freq": buffer_freq,
+            "bs_freq": bs_freq,
+            "heating_times": combined_heating_times,
+            "nths": combined_nths,
+            "contrasts_cold": np.asarray(combined_contrasts_cold)[sort_idx],
+            "contrasts_hot": np.asarray(combined_contrasts_hot)[sort_idx],
+            "rabi_fits_cold": combined_rabi_fits_cold,
+            "rabi_fits_hot": combined_rabi_fits_hot,
+            "fit_result": res_sat
+        })
+
+        fcolor = to_rgba(c, alpha=0.25)
+        ax_main.plot(combined_heating_times, combined_nths, marker="o", linestyle="", color=c,
+                     markerfacecolor=fcolor, markeredgecolor=c, ms=8)
+
+        t_fine = np.linspace(combined_heating_times.min(), combined_heating_times.max(), 1000)
+        fit_fine = res_sat.eval(t=t_fine)
+        ax_main.plot(t_fine, fit_fine, c=c, linestyle="-")
+
+        ax_main.axvline(tau, color="k", linestyle="--", alpha=0.5, label=rf"$\tau$ = {tau:.3f} $\mu$s")
+        ax_main.axhline(nth_sat, color="k", linestyle="-.", alpha=0.5, label=rf"$n_{{th}}^{{sat}}$ = {nth_sat:.3f}")
+
+        ax_main.set(xlabel=r"Heating Time ($\mu$s)", ylabel=r"$n_{th}$")
+        ax_main.set_title(f"Heated w/ {alice_or_bob_heating.capitalize()}-S{h_mode}", fontsize="small")
+        ax_main.legend(fontsize="x-small")
+
+    for idx in range(len(tasks), len(axs)):
+        fig.delaxes(axs[idx])
+
+    if fig is None or ax is None:
+        fig.suptitle("Beamsplitter Heating Saturation", y=1.02)
+        plt.tight_layout()
+
+    df_results = pd.DataFrame(results)
+
+    if bf_logs and not df_results.empty:
+        df_results = df_results.sort_values("time")
+        for col_name, log_path in bf_logs.items():
+            df_chan = load_bf_channel(log_path, col_name)
+            if df_chan is not None:
+
+                df_results = pd.merge_asof(
+                    df_results,
+                    df_chan,
+                    on="time",
+                    direction="backward",
+                    tolerance=pd.Timedelta("1.5minutes")
+                )
+        df_results = df_results.sort_index()
+
+    if plot_individual_rabis:
+        return df_results, fig, rabi_figs
+
+    return df_results, fig, None
 
 # =============================================================================
 # Clean API Aliases
