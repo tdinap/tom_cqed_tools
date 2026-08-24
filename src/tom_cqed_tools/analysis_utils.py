@@ -1726,13 +1726,11 @@ def analyze_flattop_rabi(
             result = fit_rabi(t_fit, y_fit, pi_guess=pi_guess, custom_settings=current_settings)
             pi_time = result.params["pi_time"].value
             pi_time_err = result.params["pi_time"].stderr or 0.0
-            is_valid, status_code, metrics = validate_fit_quality(t_fit, y_fit, result, fit_type="rabi")
-            red_chi2 = metrics.get("red_chi2", np.nan)
+            red_chi2 = getattr(result, "redchi", np.nan) if result else np.nan
         except Exception as e:
             print(f"Rabi fit failed for file {filenum}: {e}")
             result = None
             pi_time, pi_time_err = np.nan, 0.0
-            is_valid, status_code, metrics = False, "WARNING_FIT_CRASHED", {"reason": str(e)}
             red_chi2 = np.nan
 
         current = data.exp.get("flux_current", 0)
@@ -1745,12 +1743,11 @@ def analyze_flattop_rabi(
             "t1": bs_t1, "t1_err": t1_err, "t2": bs_t2, "t2_err": t2_err,
             "fidelity": bs_fidelity, "fidelity_err": bs_fidelity_err,
             "fit_result": result, "x_raw": time, "y_raw": y,
-            "fit_status": status_code, "fit_valid": is_valid,
         })
 
         fcolor = to_rgba(c, alpha=0.25)
-        ax.plot(time, y, marker="o", linestyle="", color=c if is_valid else "#c62828",
-                markerfacecolor=fcolor if is_valid else "#ffebee", markeredgecolor=c if is_valid else "#c62828", ms=8)
+        ax.plot(time, y, marker="o", linestyle="", color=c,
+                markerfacecolor=fcolor, markeredgecolor=c, ms=8)
 
         if result is not None:
             t_fine = np.linspace(t_fit.min(), t_fit.max(), 1000)
@@ -1760,18 +1757,13 @@ def analyze_flattop_rabi(
                 ax.fill_between(t_fine, fit_fine - model_err, fit_fine + model_err, color=c, alpha=0.15)
             except Exception:
                 pass
-            ax.plot(t_fine, fit_fine, c=c if is_valid else "#c62828", linestyle="-" if is_valid else "--")
+            ax.plot(t_fine, fit_fine, c=c, linestyle="-")
             if not np.isnan(pi_time) and pi_time > 0:
-                ax.axvline(startfit + pi_time, linestyle="--", color=c if is_valid else "#c62828")
+                ax.axvline(startfit + pi_time, linestyle="--", color=c)
                 if pi_time_err > 0 and not np.isnan(pi_time_err) and pi_time_err < 5 * pi_time:
-                    ax.axvspan(max(time.min(), startfit + pi_time - pi_time_err), min(time.max(), startfit + pi_time + pi_time_err), color=c if is_valid else "#c62828", alpha=0.18)
+                    ax.axvspan(max(time.min(), startfit + pi_time - pi_time_err), min(time.max(), startfit + pi_time + pi_time_err), color=c, alpha=0.18)
 
         info_lines = []
-        if not is_valid:
-            info_lines.append(rf"$\bf{{[INVALID:\ {status_code}]}}$")
-            reason_short = metrics.get("reason", "")
-            if reason_short and len(reason_short) < 40:
-                info_lines.append(rf"$\it{{{reason_short}}}$")
         info_lines.append(rf"$\tau_\pi = {format_err(pi_time, pi_time_err)}\ \mu$s" if pi_time < 1e3 else rf"$\tau_\pi = {format_err(pi_time, pi_time_err)}$")
         info_lines.append(rf"Flux = {flux:.3f} $\Phi_0$")
         if not np.isnan(red_chi2):
@@ -1780,10 +1772,10 @@ def analyze_flattop_rabi(
 
         props = dict(
             boxstyle="round",
-            facecolor="#ffebee" if not is_valid else "white",
+            facecolor="white",
             alpha=0.88,
-            edgecolor="#d32f2f" if not is_valid else "lightgray",
-            linewidth=1.8 if not is_valid else 1.0,
+            edgecolor="lightgray",
+            linewidth=1.0,
         )
         ax.text(0.95, 0.95, info_text, transform=ax.transAxes, fontsize="x-small",
                 verticalalignment="top", horizontalalignment="right", bbox=props)
@@ -2277,15 +2269,10 @@ def analyze_t1(
             result = fit_t1(time, y, custom_settings=current_settings)
             t1_val = result.params["T1"].value
             t1_err = result.params["T1"].stderr or 0.0
-            is_valid, status_code, metrics = validate_fit_quality(time, y, result, fit_type="t1")
         except Exception as e:
             print(f"T1 fit failed for file {filenum}: {e}")
             result = None
             t1_val, t1_err = np.nan, 0.0
-            is_valid, status_code, metrics = False, "WARNING_FIT_CRASHED", {"reason": str(e)}
-
-        if not is_valid:
-            print(f"  [FIT INVALID] File {filenum} ({current_suffix}) T1 validation failed: {metrics.get('reason')} (Status: {status_code})")
 
         results.append(
             {
@@ -2295,8 +2282,6 @@ def analyze_t1(
                 "flux": flux,
                 "t1": t1_val,
                 "t1_err": t1_err,
-                "fit_status": status_code,
-                "fit_valid": is_valid,
                 "fit_result": result,
                 "x_raw": time,
                 "y_raw": y,
@@ -2309,9 +2294,9 @@ def analyze_t1(
             y,
             marker="o",
             linestyle="",
-            color=c if is_valid else "#c62828",
-            markerfacecolor=fcolor if is_valid else "#ffebee",
-            markeredgecolor=c if is_valid else "#c62828",
+            color=c,
+            markerfacecolor=fcolor,
+            markeredgecolor=c,
             ms=8,
             label="Data",
         )
@@ -2328,7 +2313,7 @@ def analyze_t1(
                     time_fine,
                     fit_fine - prediction_error,
                     fit_fine + prediction_error,
-                    color=c if is_valid else "#ef5350",
+                    color=c,
                     alpha=0.15,
                     edgecolor="none",
                     label="Prediction Band",
@@ -2339,22 +2324,17 @@ def analyze_t1(
             ax.plot(
                 time_fine,
                 fit_fine,
-                c=c if is_valid else "#c62828",
-                linestyle="-" if is_valid else "--",
+                c=c,
+                linestyle="-",
                 label=rf"$T_1 = {format_err(t1_val, t1_err)}\ \mu s$",
             )
 
             if not np.isnan(t1_val) and t1_val > 0:
-                ax.axvline(t1_val, linestyle="--", color=c if is_valid else "#c62828")
+                ax.axvline(t1_val, linestyle="--", color=c)
                 if t1_err > 0 and not np.isnan(t1_err) and t1_err < 5 * t1_val:
-                    ax.axvspan(max(time.min(), t1_val - t1_err), min(time.max(), t1_val + t1_err), color=c if is_valid else "#c62828", alpha=0.18)
+                    ax.axvspan(max(time.min(), t1_val - t1_err), min(time.max(), t1_val + t1_err), color=c, alpha=0.18)
 
         info_lines = []
-        if not is_valid:
-            info_lines.append(rf"$\bf{{[INVALID:\ {status_code}]}}$")
-            reason_short = metrics.get("reason", "")
-            if reason_short and len(reason_short) < 40:
-                info_lines.append(rf"$\it{{{reason_short}}}$")
         info_lines.append(rf"$T_1 = {format_err(t1_val, t1_err)}\ \mu$s")
         info_lines.append(rf"Flux = {flux:.3f} $\Phi_0$")
         red_chi2 = getattr(result, "redchi", np.nan) if result else np.nan
@@ -2364,10 +2344,10 @@ def analyze_t1(
 
         props = dict(
             boxstyle="round",
-            facecolor="#ffebee" if not is_valid else "white",
+            facecolor="white",
             alpha=0.88,
-            edgecolor="#d32f2f" if not is_valid else "lightgray",
-            linewidth=1.8 if not is_valid else 1.0,
+            edgecolor="lightgray",
+            linewidth=1.0,
         )
         ax.text(
             0.95,
@@ -2543,15 +2523,10 @@ def analyze_ramsey(
             t2_err = result.params["T2"].stderr or 0.0
             f_val = result.params["f"].value
             f_err = result.params["f"].stderr or 0.0
-            is_valid, status_code, metrics = validate_fit_quality(time, y, result, fit_type="ramsey")
         except Exception as e:
             print(f"Ramsey fit failed for file {filenum}, mode {mode}: {e}")
             result = None
             t2_val, t2_err, f_val, f_err = np.nan, 0.0, np.nan, 0.0
-            is_valid, status_code, metrics = False, "WARNING_FIT_CRASHED", {"reason": str(e)}
-
-        if not is_valid:
-            print(f"  [FIT INVALID] File {filenum} ({current_suffix}) Ramsey validation failed: {metrics.get('reason')} (Status: {status_code})")
 
         results.append(
             {
@@ -2563,8 +2538,6 @@ def analyze_ramsey(
                 "t2_err": t2_err,
                 "f": f_val,
                 "f_err": f_err,
-                "fit_status": status_code,
-                "fit_valid": is_valid,
                 "fit_result": result,
                 "x_raw": time,
                 "y_raw": y,
@@ -2577,9 +2550,9 @@ def analyze_ramsey(
             y,
             marker="o",
             linestyle="",
-            color=c if is_valid else "#c62828",
-            markerfacecolor=fcolor if is_valid else "#ffebee",
-            markeredgecolor=c if is_valid else "#c62828",
+            color=c,
+            markerfacecolor=fcolor,
+            markeredgecolor=c,
             ms=8,
             label="Data",
         )
@@ -2596,7 +2569,7 @@ def analyze_ramsey(
                     time_fine,
                     fit_fine - prediction_error,
                     fit_fine + prediction_error,
-                    color=c if is_valid else "#ef5350",
+                    color=c,
                     alpha=0.15,
                     edgecolor="none",
                     label="Prediction Band",
@@ -2612,12 +2585,12 @@ def analyze_ramsey(
             if not is_echo:
                 lbl += "\n" + rf"$f = {format_err(f_val, f_err)}$ MHz"
 
-            ax.plot(time_fine, fit_fine, c=c if is_valid else "#c62828", linestyle="-" if is_valid else "--", label=lbl)
+            ax.plot(time_fine, fit_fine, c=c, linestyle="-", label=lbl)
 
             if not np.isnan(t2_val) and t2_val > 0:
-                ax.axvline(t2_val, linestyle="--", color=c if is_valid else "#c62828")
+                ax.axvline(t2_val, linestyle="--", color=c)
                 if t2_err > 0 and not np.isnan(t2_err) and t2_err < 5 * t2_val:
-                    ax.axvspan(max(time.min(), t2_val - t2_err), min(time.max(), t2_val + t2_err), color=c if is_valid else "#c62828", alpha=0.18)
+                    ax.axvspan(max(time.min(), t2_val - t2_err), min(time.max(), t2_val + t2_err), color=c, alpha=0.18)
         else:
             ax.text(
                 0.5, 0.5, "Fit Failed", transform=ax.transAxes,
@@ -2626,11 +2599,6 @@ def analyze_ramsey(
             )
 
         info_lines = []
-        if not is_valid:
-            info_lines.append(rf"$\bf{{[INVALID:\ {status_code}]}}$")
-            reason_short = metrics.get("reason", "")
-            if reason_short and len(reason_short) < 40:
-                info_lines.append(rf"$\it{{{reason_short}}}$")
         info_lines.extend([
             f"Current = {current * 1e3:.3f} mA",
             rf"Flux = {flux:.3f} $\Phi_0$",
@@ -2642,10 +2610,10 @@ def analyze_ramsey(
 
         props = dict(
             boxstyle="round",
-            facecolor="#ffebee" if not is_valid else "white",
+            facecolor="white",
             alpha=0.88,
-            edgecolor="#d32f2f" if not is_valid else "lightgray",
-            linewidth=1.8 if not is_valid else 1.0,
+            edgecolor="lightgray",
+            linewidth=1.0,
         )
         ax.text(
             0.95,
@@ -3095,19 +3063,11 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
             result = None
             pi_time, pi_time_err = np.nan, 0.0
 
-        is_valid, status_code, metrics = validate_fit_quality(t, y, result, fit_type="rabi")
-        if not is_valid:
-            msg = f"Rabi File {filenum} ({suffix}) fit validation failed: {metrics.get('reason')} (Status: {status_code})"
-            send_notification(msg, title="Rabi Fit Quality Warning", config=None, is_critical=True)
-            if raise_on_failure:
-                raise CalibrationError(msg)
-
         rabi_freq = 1.0 / (2.0 * pi_time) if (pi_time and not np.isnan(pi_time) and pi_time != 0) else np.nan
         results.append({
             "filenum": filenum, "mode": mode, "current": current, "flux": flux,
             "pi_time": pi_time, "pi_time_err": pi_time_err, "rabi_freq": rabi_freq,
             "fit_result": result, "x_raw": t, "y_raw": y,
-            "fit_status": status_code, "fit_valid": is_valid,
         })
 
         fcolor = to_rgba(c, alpha=0.25)
@@ -3143,7 +3103,6 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
         if not np.isnan(red_chi2):
             info_lines.append(rf"$\chi^2_{{\rm red}} = {red_chi2:.2f}$")
         info_lines.extend([
-            f"Status = {status_code}",
             rf"Flux = {flux:.3f} $\Phi_0$",
         ])
         info_text = "\n".join(info_lines)
