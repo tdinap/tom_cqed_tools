@@ -14,7 +14,7 @@ import pandas as pd
 # Add missing imports for constants
 import scipy.constants as const
 import slab.dsfit as dsf
-from jax import jacfwd, jacrev, jit
+from jax import jacfwd, jacrev
 from lmfit import Model
 from lmfit.models import LinearModel, LorentzianModel
 from matplotlib.colors import to_rgba
