@@ -2727,6 +2727,125 @@ def nth_from_contrast(contrasts):
 
 
 # =============================================================================
+# HELPER FUNCTIONS FOR OVERRIDES
+# =============================================================================
+def _merge_param_dicts(base, override):
+    """Recursively merges parameter setting dictionaries."""
+    merged = copy.deepcopy(base) if base else {}
+    if not override:
+        return merged
+    for param, settings in override.items():
+        if param in merged and isinstance(merged[param], dict) and isinstance(settings, dict):
+            merged[param].update(settings)
+        else:
+            merged[param] = copy.deepcopy(settings)
+    return merged
+
+def _extract_fit_configs(override_dict):
+    """Splits an override dictionary into 'bs', 'bs_cold', 'bs_hot', and 'sat' sections."""
+    bs_cfg = {}
+    bs_cold_cfg = {}
+    bs_hot_cfg = {}
+    sat_cfg = {}
+
+    if not override_dict:
+        return bs_cfg, bs_cold_cfg, bs_hot_cfg, sat_cfg
+
+    # Explicit section keys
+    if "sat" in override_dict or "saturation" in override_dict:
+        sat_cfg = override_dict.get("sat", override_dict.get("saturation", {}))
+    if "bs" in override_dict:
+        bs_cfg = override_dict["bs"]
+    if "bs_cold" in override_dict:
+        bs_cold_cfg = override_dict["bs_cold"]
+    if "bs_hot" in override_dict:
+        bs_hot_cfg = override_dict["bs_hot"]
+
+    # Auto-route top-level parameter names if section keys were omitted
+    sat_params = {"nth_sat", "tau"}
+    bs_params = {"gbs", "k1", "k2", "A"}
+    for k, v in override_dict.items():
+        if k in sat_params:
+            sat_cfg[k] = v
+        elif k in bs_params:
+            bs_cfg[k] = v
+
+    return bs_cfg, bs_cold_cfg, bs_hot_cfg, sat_cfg
+
+# =============================================================================
+# FIT WRAPPERS
+# =============================================================================
+def fit_bs_contrast(t, y, startfit, fixed_gbs=None, custom_settings=None):
+    """
+    Fits standard beamsplitter decay to extract contrast (A) and gbs.
+    If fixed_gbs is provided, the frequency is locked (used for heated sweeps).
+    Accepts custom_settings dictionary to set/freeze parameters.
+    """
+    model = Model(bs_decay_func)
+    params = model.make_params()
+
+    mean_y = (np.max(y) + np.min(y)) / 2
+    A_guess = (np.max(y) - np.min(y)) / 2
+
+    # Invert guess if starting below the mean
+    if len(y) > startfit and y[startfit] < mean_y:
+        A_guess = -A_guess
+
+    params["A"].set(value=A_guess, min=-1.0, max=1.0)
+    params["k1"].set(value=0.01, min=1e-5)
+    params["k2"].set(value=0.01, min=1e-5)
+
+    if fixed_gbs is not None:
+        params["gbs"].set(value=fixed_gbs, vary=False)
+        params["B"].set(value=0.0)
+    else:
+        params["gbs"].set(value=2.0, vary=True, min=0.01)
+        params["B"].set(value=np.min(y), min=-1.0, max=1.0)
+
+    # Apply fit overrides if specified
+    if custom_settings:
+        for param_name, settings in custom_settings.items():
+            if param_name in params:
+                params[param_name].set(**settings)
+
+    return model.fit(y[startfit:], params, t=t[startfit:])
+
+
+def exp_sat_func(t, nth_sat, tau, B):
+    """
+    nth_sat: The thermal saturation limit as t -> inf
+    B: Initial nth at t = 0
+    """
+    return (nth_sat - B) * (1 - np.exp(-t / tau)) + B
+
+
+def fit_heating_saturation(t, y, custom_settings=None):
+    """
+    Uses lmfit to find tau, the baseline (B), and saturation limit (nth_sat).
+    Accepts custom_settings dictionary to set/freeze parameters.
+    """
+    t, y = np.asarray(t, float), np.asarray(y, float)
+    model = Model(exp_sat_func)
+    params = model.make_params()
+
+    initial_nth = y[0] if len(y) > 0 else 0
+    sat_nth = np.mean(y[-3:]) if len(y) > 3 else (y[-1] if len(y) > 0 else 0.1)
+    rough_tau = np.mean(t) if len(t) > 0 else 1.0
+
+    params['nth_sat'].set(value=sat_nth, min=0)
+    params['tau'].set(value=rough_tau, min=1e-5)
+    params['B'].set(value=initial_nth, min=0)
+
+    # Apply fit overrides if specified
+    if custom_settings:
+        for param_name, settings in custom_settings.items():
+            if param_name in params:
+                params[param_name].set(**settings)
+
+    return model.fit(y, params, t=t)
+
+
+# =============================================================================
 # adding context to saved figures
 # =============================================================================
 
@@ -3143,6 +3262,12 @@ def analyze_bs_heating_population(
     ncols = int(np.ceil(np.sqrt(n)))
     nrows = int(np.ceil(n / ncols)) if ncols > 0 else 1
 
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
+    axs = axs.flatten()
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n // 5 + 1)
 
     results = []
