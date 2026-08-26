@@ -1604,6 +1604,29 @@ def fit_rabi(t, y, pi_guess=None, custom_settings=None, yerr=None):
     return model.fit(y, params, t=t, weights=weights)
 
 
+def fit_bs_rabi(t, y, pi_guess, custom_settings=None, yerr=None):
+    '''Fit beamsplitter/sideband Rabi using the two-rate bs_decay_func model (k1, k2, gbs).'''
+    model = Model(bs_decay_func)
+    params = model.make_params()
+
+    rough_A = np.max(y) - np.min(y)
+    rough_B = np.clip(np.mean(y), 0, 1)
+    rough_gbs = np.pi / (2 * pi_guess)
+
+    params["A"].set(value=rough_A, min=0.01, max=2.0)
+    params["k1"].set(value=1e-3, min=0, max=100)
+    params["k2"].set(value=1e-3, min=0, max=100)
+    params["gbs"].set(value=rough_gbs, min=0.005 * rough_gbs, max=5.0 * rough_gbs)
+    params["B"].set(value=rough_B, min=0.0, max=1.0)
+
+    if custom_settings:
+        for param_name, settings in custom_settings.items():
+            params[param_name].set(**settings)
+
+    weights = 1 / yerr if yerr is not None else None
+    return model.fit(y, params, t=t, weights=weights)
+
+
 def fit_rabi_with_phase(t, y, pi_guess, custom_settings=None, yerr=None):
     model = Model(bs_decay_func_with_phase)
     params = model.make_params()
@@ -1738,14 +1761,89 @@ def analyze_flattop_rabi(
         y_fit = y[start_idx:]
 
         try:
-            result = fit_rabi(t_fit, y_fit, pi_guess=pi_guess, custom_settings=current_settings)
-            pi_time = result.params["pi_time"].value
-            pi_time_err = result.params["pi_time"].stderr or 0.0
-            red_chi2 = getattr(result, "redchi", np.nan) if result else np.nan
+            if heated_fit:
+                result = fit_rabi_heated(t_fit, y_fit, pi_guess, custom_settings=current_settings)
+            else:
+                result = fit_bs_rabi(t_fit, y_fit, pi_guess, custom_settings=current_settings)
+
+            # --- 4. Parameter and Standard Error Extraction ---
+            v = result.values
+            err_k1 = result.params["k1"].stderr or 0.0
+            err_k2 = result.params["k2"].stderr or 0.0
+            err_gbs = result.params["gbs"].stderr or 0.0
+
+            bs_t1 = 1 / v["k1"] if v["k1"] > 0 else np.inf
+            bs_t2 = 1 / v["k2"] if v["k2"] > 0 else np.inf
+            pi_time = np.pi / (2 * v["gbs"]) if v["gbs"] != 0 else 0.0
+
+            t1_err = (bs_t1**2) * err_k1 if bs_t1 != np.inf else 0.0
+            t2_err = (bs_t2**2) * err_k2 if bs_t2 != np.inf else 0.0
+            pi_time_err = pi_time * (err_gbs / v["gbs"]) if v["gbs"] != 0 else 0.0
+
+            # --- 5. Generalized Fidelity Error Propagation (JAX) ---
+            # var_names = ["k1", "k2", "gbs"]
+            # cov = np.zeros((3, 3))
+
+            # if getattr(result, "covar", None) is not None:
+            #     # Safely build the covariance matrix, allowing for fixed parameters
+            #     for r_idx, name_i in enumerate(var_names):
+            #         for c_idx, name_j in enumerate(var_names):
+            #             if name_i in result.var_names and name_j in result.var_names:
+            #                 idx_i = result.var_names.index(name_i)
+            #                 idx_j = result.var_names.index(name_j)
+            #                 cov[r_idx, c_idx] = result.covar[idx_i, idx_j]
+            # else:
+            #     cov = np.diag([err_k1**2, err_k2**2, err_gbs**2])
+
+            if heated_fit:
+                x_vals = jnp.array([v["k1"], v["k2"], v["k_heat"], v["heat_pop"], v["gbs"]])
+
+                if result.covar is not None:
+                    if len(result.covar) != len(x_vals):
+                        rows = range(1, len(x_vals) + 1)
+                        cols = rows
+                        cov = result.covar[np.ix_(rows, cols)]
+                    else:
+                        cov = result.covar
+
+                else:
+                    cov = np.diag(
+                        [
+                            err_k1**2,
+                            err_k2**2,
+                            v["k_heat"] ** 2,
+                            v["heat_pop"] ** 2,
+                            err_gbs**2,
+                        ]
+                    )
+
+                bs_fidelity_jax, cov_f = propagate(_bs_fidelity_heated, x_vals, cov)
+
+            else:
+                x_vals = jnp.array([v["k1"], v["k2"], v["gbs"]])
+
+                if result.covar is not None:
+                    if len(result.covar) != len(x_vals):
+                        rows = range(1, len(x_vals) + 1)
+                        cols = rows
+                        cov = result.covar[np.ix_(rows, cols)]
+                    else:
+                        cov = result.covar
+                else:
+                    cov = np.diag([err_k1**2, err_k2**2, err_gbs**2])
+
+                bs_fidelity_jax, cov_f = propagate(_bs_fidelity, x_vals, cov)
+
+            bs_fidelity = float(bs_fidelity_jax)
+            bs_fidelity_err = float(jnp.sqrt(jnp.abs(cov_f)))
+            red_chi2 = getattr(result, "redchi", np.nan)
         except Exception as e:
             print(f"Rabi fit failed for file {filenum}: {e}")
             result = None
             pi_time, pi_time_err = np.nan, 0.0
+            bs_t1, t1_err = np.nan, 0.0
+            bs_t2, t2_err = np.nan, 0.0
+            bs_fidelity, bs_fidelity_err = np.nan, 0.0
             red_chi2 = np.nan
 
         current = data.exp.get("flux_current", 0)
@@ -1780,6 +1878,9 @@ def analyze_flattop_rabi(
 
         info_lines = []
         info_lines.append(rf"$\tau_\pi = {format_err(pi_time, pi_time_err)}\ \mu$s" if pi_time < 1e3 else rf"$\tau_\pi = {format_err(pi_time, pi_time_err)}$")
+        info_lines.append(rf"$T_1 = {format_err(bs_t1, t1_err)}\ \mu$s")
+        info_lines.append(rf"$T_2 = {format_err(bs_t2, t2_err)}\ \mu$s")
+        info_lines.append(rf"$\mathscr{{F}} = {format_err(bs_fidelity, bs_fidelity_err)}$")
         info_lines.append(rf"Flux = {flux:.3f} $\Phi_0$")
         if not np.isnan(red_chi2):
             info_lines.append(rf"$\chi^2_{{\rm red}} = {red_chi2:.2f}$")
