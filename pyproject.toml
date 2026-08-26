@@ -8,15 +8,24 @@ version = "0.1.0"
 description = "A collection of circuit QED tools."
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "scipy",
     "matplotlib",
     "pandas",
     "tabulate",
-    "marimo"
+    "marimo",
+    "h5py",
+    "jax",
+    "lmfit",
+    "ipython"
 ]
+# NOTE: analysis_utils.py also imports `slab` (the Schuster lab package). It is not
+# on PyPI and must be installed separately, e.g. from a local checkout:
+#     pip install -e /path/to/slab
+# Do not add a bare "slab" entry here -- the name `slab` on PyPI is an unrelated
+# psychoacoustics package and would install the wrong code.
 
 [tool.setuptools.packages.find]
 where = ["src"]
