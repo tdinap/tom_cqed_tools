@@ -3129,6 +3129,18 @@ def analyze_spectroscopy(
 # GENERIC RABI ORCHESTRATOR
 # =============================================================================
 def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overrides=None, fit_overrides=None, fig=None, ax=None, raise_on_failure=True, title=None, **kwargs):
+    """
+    Fit and plot Rabi data for one or more (filenum, mode) pairs in a grid.
+
+    `suffix` selects the file(s) to load and works two ways:
+      - A plain string, e.g. suffix="bs_a3_rabi", is used as-is for every
+        panel. This is the old behavior and still works unchanged.
+      - A template string containing "{mode}", e.g. suffix="bs_a{mode}_rabi",
+        is formatted per panel using that panel's entry from `modes`, so one
+        call can sweep multiple files instead of calling this once per mode.
+    The same suffix convention is used by analyze_spectroscopy,
+    analyze_flattop_rabi, and analyze_flattop_spectroscopy.
+    """
     if fit_overrides is None: fit_overrides = {}
     tasks = list(zip(filenums, modes))
     n_files = len(tasks)
