@@ -29,3 +29,13 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff.lint]
+# Only bug-catching checks (undefined names, unused/duplicate imports, unused
+# locals). No style/formatting rules -- this repo's style is hand-chosen, not
+# ruff-enforced, and running the formatter is out of scope for routine edits.
+# F821 (undefined name) and F401 (unused import) are exactly the class of bug
+# that broke this file in the Aug 24 2026 merge: six analyze_flattop_rabi
+# variables and the ipynbname/glob imports all vanished silently because
+# nothing checked for them before commit.
+select = ["F"]
