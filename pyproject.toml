@@ -19,7 +19,8 @@ dependencies = [
     "h5py",
     "jax",
     "lmfit",
-    "ipython"
+    "ipython",
+    "ipynbname"
 ]
 # NOTE: analysis_utils.py also imports `slab` (the Schuster lab package). It is not
 # on PyPI and must be installed separately, e.g. from a local checkout:
