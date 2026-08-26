@@ -1,6 +1,7 @@
 # tools for plotting and analyzing cavity resonators
 
 import copy
+import glob
 import json
 import re
 import os
@@ -3125,23 +3126,6 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
     fig.suptitle(sup_str, y=1.02, fontsize=16)
     plt.tight_layout()
     return pd.DataFrame(results), fig
-
-
-    initial_nth = y[0] if len(y) > 0 else 0
-    sat_nth = np.mean(y[-3:]) if len(y) > 3 else (y[-1] if len(y) > 0 else 0.1)
-    rough_tau = np.mean(t) if len(t) > 0 else 1.0
-
-    params['nth_sat'].set(value=sat_nth, min=0)
-    params['tau'].set(value=rough_tau, min=1e-5)
-    params['B'].set(value=initial_nth, min=0)
-
-    # Apply fit overrides if specified
-    if custom_settings:
-        for param_name, settings in custom_settings.items():
-            if param_name in params:
-                params[param_name].set(**settings)
-
-    return model.fit(y, params, t=t)
 
 
 def load_bf_channel(file_paths, column_name):
