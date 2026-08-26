@@ -821,12 +821,6 @@ def purcell_T1(g, fr, fq, qr):
     return 1 / kappa_q
 
 
-def purcell_T1_inv(g, fr, fq, qr):
-    kappa_r = 2 * np.pi * fr / qr
-    T1q = 1 / ((g**2 / (fr - fq) ** 2) / kappa_r)
-    return T1q
-
-
 def purcell_Qi(g, fr, fq, qr):
     """
     Calculate the Purcell limited internal quality factor Qi for a qubit coupled to a resonator.
