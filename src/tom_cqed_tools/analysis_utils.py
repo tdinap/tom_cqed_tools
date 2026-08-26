@@ -1413,10 +1413,17 @@ def analyze_flattop_spectroscopy(
         ax, c = axs[ii], colors[ii]
         
         if suffix is None:
-            suffix = f"bs_{alice_or_bob[0]}{mode}_spectroscopy"
+            current_suffix = f"bs_{alice_or_bob[0]}{mode}_spectroscopy"
+        elif "{" in str(suffix):
+            current_suffix = str(suffix).format(
+                alice_or_bob=alice_or_bob or "", mode=mode,
+                a_or_b=(alice_or_bob[0] if alice_or_bob else ""),
+            )
+        else:
+            current_suffix = str(suffix)
 
         try:
-            data = LabData(data_path, filenum=filenum, suffix=suffix)
+            data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
             ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
             ax.axis("off")
@@ -1505,7 +1512,7 @@ def analyze_flattop_spectroscopy(
         axs[idx].set_visible(False)
 
     if fig is None or ax is None:
-        sup_str = title if title is not None else f"Flattop Spectroscopy ({suffix})"
+        sup_str = title if title is not None else f"Flattop Spectroscopy ({current_suffix})"
         fig.suptitle(sup_str, y=1.02)
         plt.tight_layout()
 
@@ -1687,10 +1694,17 @@ def analyze_flattop_rabi(
         ax, c = axs[ii], colors[ii]
 
         if oldsuffix:
-            suffix = f"bs_{alice_or_bob[0]}{mode}_rabi"
+            current_suffix = f"bs_{alice_or_bob[0]}{mode}_rabi"
+        elif "{" in str(suffix):
+            current_suffix = str(suffix).format(
+                alice_or_bob=alice_or_bob or "", mode=mode,
+                a_or_b=(alice_or_bob[0] if alice_or_bob else ""),
+            )
+        else:
+            current_suffix = str(suffix)
 
         try:
-            data = LabData(data_path, filenum=filenum, suffix=suffix)
+            data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
             ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
             ax.axis("off")
@@ -1788,7 +1802,7 @@ def analyze_flattop_rabi(
         axs[idx].set_visible(False)
 
     if fig is None or ax is None:
-        sup_str = title if title is not None else f"Flattop Rabi ({suffix})"
+        sup_str = title if title is not None else f"Flattop Rabi ({current_suffix})"
         fig.suptitle(sup_str, y=1.02)
         plt.tight_layout()
 
@@ -2951,9 +2965,15 @@ def analyze_spectroscopy(
 
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
+        if "{" in str(suffix):
+            current_suffix = str(suffix).format(mode=mode)
+        else:
+            current_suffix = str(suffix)
+
         try:
-            data = LabData(data_path, filenum=filenum, suffix=suffix)
+            data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
+            ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
             ax.axis("off")
             continue
         freq = data.xpts / 1e9 if data.xpts.max() > 1e6 else data.xpts
@@ -3005,7 +3025,7 @@ def analyze_spectroscopy(
 
     for idx in range(len(tasks), len(axs)): axs[idx].set_visible(False)
     if fig is None or ax is None:
-        sup_str = title if title is not None else f"Spectroscopy ({suffix})"
+        sup_str = title if title is not None else f"Spectroscopy ({current_suffix})"
         fig.suptitle(sup_str, y=1.02)
         plt.tight_layout()
     return pd.DataFrame(results), fig
@@ -3030,9 +3050,15 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
 
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
+        if "{" in str(suffix):
+            current_suffix = str(suffix).format(mode=mode)
+        else:
+            current_suffix = str(suffix)
+
         try:
-            data = LabData(data_path, filenum=filenum, suffix=suffix)
+            data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
+            ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
             ax.axis("off")
             continue
         t = data.xpts * 1e6 if data.xpts.max() < 1e-3 else data.xpts
@@ -3092,7 +3118,7 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
             mode_str = f"Buffer ({mode})"
         elif mode is not None and not (isinstance(mode, float) and np.isnan(mode)):
             mode_str = f"Storage {mode}" if mode != 0 else "SNAIL"
-        elif "ef" in str(suffix):
+        elif "ef" in str(current_suffix):
             mode_str = "Qubit e-f"
         else:
             mode_str = "Qubit g-e"
@@ -3118,8 +3144,8 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
     elif any(m in ["alice", "bob"] for _, m in tasks if m):
         sup_str = "Buffer Rabi"
     elif any(m is not None and not (isinstance(m, float) and np.isnan(m)) for _, m in tasks):
-        sup_str = f"Beamsplitter Rabi ({suffix})"
-    elif "ef" in str(suffix):
+        sup_str = f"Rabi ({current_suffix})"
+    elif "ef" in str(current_suffix):
         sup_str = "Qubit e-f Rabi"
     else:
         sup_str = "Qubit g-e Rabi"
