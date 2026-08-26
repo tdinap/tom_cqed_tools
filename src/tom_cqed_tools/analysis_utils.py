@@ -26,7 +26,7 @@ from scipy.constants import e, h, k
 from slab import fitlor
 from tabulate import tabulate
 
-# import ipynbname
+import ipynbname
 import subprocess
 import urllib.request
 from IPython import get_ipython
