@@ -6,6 +6,10 @@ local_data/
 scratch/
 temp.py
 
+# marimo's per-notebook session cache (stores cell outputs as JSON); it is
+# regenerated on every run and should never be committed.
+__marimo__/
+
 # Standard Python ignores
 __pycache__/
 *.py[cod]

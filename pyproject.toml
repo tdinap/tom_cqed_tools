@@ -20,7 +20,15 @@ dependencies = [
     "jax",
     "lmfit",
     "ipython",
-    "ipynbname"
+    "ipynbname",
+    "scqubits",
+    # qutip must stay <5.2: 5.2+ returns scipy `csc_array` from its sparse
+    # accessors, while scqubits 4.3.1 isinstance-checks for `csc_matrix`
+    # (scqubits/utils/spectrum_utils.py convert_operator_to_qobj). With qutip
+    # 5.3.x every HilbertSpace.eigensys() call dies with
+    # "TypeError: Unsupported operator type: <class 'scipy.sparse._csc.csc_array'>".
+    # This is independent of the scipy version -- scipy 1.18 is fine.
+    "qutip<5.2",
 ]
 # NOTE: analysis_utils.py also imports `slab` (the Schuster lab package). It is not
 # on PyPI and must be installed separately, e.g. from a local checkout:
