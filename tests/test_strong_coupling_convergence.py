@@ -81,6 +81,22 @@ def test_converged_in_truncation(ncut, nt, nc, key):
     assert abs(solve(ncut=ncut, nt=nt, nc=nc)[key] - REF[key]) < 1e-6
 
 
+# Best basis we can afford, at the very top of the g slider. Everything smaller
+# is compared against this.
+REF_MAX_G = solve(g=0.2, ncut=40, nt=14, nc=14)
+
+
+@pytest.mark.parametrize("nt,nc", [(6, 6), (8, 8), (10, 10), (12, 12)])
+@pytest.mark.parametrize("key", ["w_t", "w_c", "alpha", "K", "chi"])
+def test_converged_at_max_coupling(nt, nc, key):
+    """Convergence is not a single fact -- it depends on how hard you drive the
+    system. The margin shrinks by ~1000x from the default coupling to the top of
+    the g slider (0.8 Hz -> 941 Hz of truncation error in alpha), so verifying it
+    only at g=25 MHz proves nothing about g=200 MHz. Tolerance 2 kHz.
+    """
+    assert abs(solve(g=0.2, nt=nt, nc=nc)[key] - REF_MAX_G[key]) < 2e-6
+
+
 def test_excitation_number_is_conserved():
     """Manifold labeling is only valid while N is a good quantum number."""
     assert REF["N_err"] < 1e-3
@@ -104,28 +120,56 @@ def test_modes_are_balanced_at_resonance():
     assert abs(r["p_tmon"] - 0.5) < 0.02
 
 
-@pytest.mark.xfail(
-    reason="UNRESOLVED -- do not trust chi quantitatively until this is closed. "
-    "The numerical cross-Kerr does not approach the leading-order Koch result; "
-    "the ratio chi_num/chi_koch GROWS with detuning (1.73 at 0.8 GHz, 2.06 at "
-    "1.2, 2.52 at 2.0, 3.32 at 4.0) instead of settling on a constant. A pure "
-    "convention mismatch would give a fixed factor (2 is expected, since the "
-    "energy combination E(e1)-E(e0)-E(g1)+E(g0) equals 2*chi in the chi*sigma_z*adag_a "
-    "convention). A drifting ratio means something else: most likely the Koch "
-    "formula omits the cavity's coupling to the higher transmon transitions "
-    "(n_12, n_23, ...), which this exact diagonalization includes -- or the N=2 "
-    "'mixed' state selection drifts at large detuning. Resolve by (a) summing "
-    "the full second-order perturbation series over transmon levels, and "
-    "(b) printing the bare-state content of the N=2 manifold at each detuning.",
-    strict=True,
-)
-def test_chi_matches_koch_dispersive_formula():
-    """Far off resonance, chi -> g_eff^2 * alpha / (Delta * (Delta + alpha)),
-    Koch et al. PRA 76, 042319 (2007). Agreement here would mean the interaction
-    Hamiltonian itself is right, not merely converged."""
-    r0 = solve()
-    Eosc = r0["bare_w_t"] + 1.2  # 1.2 GHz detuned: firmly dispersive
-    r = solve(Eosc=Eosc)
-    delta = Eosc - r["bare_w_t"]
-    predicted = r["g_eff"] ** 2 * r["bare_alpha"] / (delta * (delta + r["bare_alpha"]))
-    assert r["chi"] == pytest.approx(predicted, rel=0.15)
+def chi_perturbative(Eosc, g=G, nlev=6):
+    """Cross-Kerr from second-order perturbation theory in H_int = g*n*(a+adag).
+
+        chi = g^2 (S_1 - S_0),   S_j = sum_k |n_kj|^2 [1/(w_c - d_kj) - 1/(w_c + d_kj)]
+
+    with d_kj = E_k - E_j. This is the energy combination
+    E(e,1) - E(e,0) - E(g,1) + E(g,0), which equals 2*chi in the usual
+    chi*sigma_z*adag*a convention.
+
+    Do NOT compare against the bare two-level Koch result
+    g^2*alpha/(Delta*(Delta+alpha)) (Koch et al., PRA 76, 042319 (2007)):
+      * its Delta is w_q - w_c, the opposite sign from this module's Delta, so
+        the denominator becomes Delta*(Delta - alpha) here;
+      * it is missing the factor 2 above;
+      * it truncates at the 0-1-2 levels, so it omits the n_23, n_34, ...
+        contributions that the exact diagonalization includes. That omission
+        grows with detuning, so no constant prefactor can reconcile the two.
+    The full sum below has none of those limitations.
+    """
+    t = scq.Transmon(EJ=EJ, EC=EC, ng=0.0, ncut=30, truncated_dim=nlev)
+    E = t.eigenvals(evals_count=nlev)
+    # evals_count is required: this defaults to 6 levels regardless of
+    # truncated_dim, so without it the sum below IndexErrors for nlev > 6.
+    n = t.matrixelement_table("n_operator", evals_count=nlev)
+
+    def S(j):
+        return sum(
+            abs(n[k, j]) ** 2
+            * (1.0 / (Eosc - (E[k] - E[j])) - 1.0 / (Eosc + (E[k] - E[j])))
+            for k in range(nlev)
+            if k != j
+        )
+
+    return g**2 * (S(1) - S(0))
+
+
+@pytest.mark.parametrize("delta", [0.8, 1.2, 2.0, 3.0, 4.0])
+def test_chi_matches_second_order_perturbation_theory(delta):
+    """Exact diagonalization must reproduce 2nd-order PT in the dispersive
+    regime. This tests the interaction Hamiltonian itself -- a convergence
+    sweep would never catch a wrong H_int, since a wrong Hamiltonian converges
+    perfectly well to the wrong answer."""
+    Eosc = REF["bare_w_t"] + delta
+    assert solve(Eosc=Eosc)["chi"] == pytest.approx(chi_perturbative(Eosc), rel=0.01)
+
+
+@pytest.mark.parametrize("g,tol", [(0.002, 1e-4), (0.005, 5e-4), (0.010, 1e-3)])
+def test_chi_approaches_perturbation_theory_as_coupling_vanishes(g, tol):
+    """The residual is a 4th-order effect, so it must shrink like g^2. Observed:
+    ratio 0.9856 at g=50 MHz, 0.9963 at 25, 0.9994 at 10, 1.0000 at 2."""
+    Eosc = REF["bare_w_t"] + 1.2
+    ratio = solve(Eosc=Eosc, g=g)["chi"] / chi_perturbative(Eosc, g=g)
+    assert abs(ratio - 1.0) < tol
