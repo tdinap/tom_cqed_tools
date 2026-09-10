@@ -49,6 +49,10 @@ venv.bak/
 .vscode/
 .idea/
 
+# Claude Code machine-local config (e.g. launch.json for previewing dev
+# servers) -- specific to whoever's machine it was created on.
+.claude/
+
 # Generated PDF figures
 *.pdf
 

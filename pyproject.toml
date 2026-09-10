@@ -22,12 +22,17 @@ dependencies = [
     "ipython",
     "ipynbname",
     "scqubits",
-    # qutip must stay <5.2: 5.2+ returns scipy `csc_array` from its sparse
-    # accessors, while scqubits 4.3.1 isinstance-checks for `csc_matrix`
-    # (scqubits/utils/spectrum_utils.py convert_operator_to_qobj). With qutip
-    # 5.3.x every HilbertSpace.eigensys() call dies with
-    # "TypeError: Unsupported operator type: <class 'scipy.sparse._csc.csc_array'>".
-    # This is independent of the scipy version -- scipy 1.18 is fine.
+    # qutip must stay <5.2 until scqubits fixes this upstream (4.3.1 is the
+    # latest release as of Sep 2026 and still has the bug):
+    #   qutip 5.2 switched .as_scipy() to scipy's sparse *array* API, so
+    #   scqubits' Qobj_to_scipy_csc_matrix() now returns a csc_array. scqubits
+    #   then isinstance-checks against csc_matrix -- a parallel scipy hierarchy,
+    #   not a parent -- so every HilbertSpace.eigensys() call dies with
+    #   "TypeError: Unsupported operator type: <class '...csc_array'>".
+    # Nothing in this repo can work around it; the failure is entirely inside
+    # scqubits. Independent of the scipy version (scipy 1.18 is fine).
+    # TO REMOVE: when a scqubits release accepts csc_array, drop this pin and
+    # run tests/test_strong_coupling_convergence.py to confirm.
     "qutip<5.2",
 ]
 # NOTE: analysis_utils.py also imports `slab` (the Schuster lab package). It is not
