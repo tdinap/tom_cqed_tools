@@ -1371,6 +1371,47 @@ fit_spectroscopy_old = fit_lorentzian_spectroscopy
 # =============================================================================
 # ORCHESTRATOR
 # =============================================================================
+def expand_suffix(suffix, mode=None, alice_or_bob=None, filenum=None):
+    """
+    Expand one panel's filename suffix for the analyze_* orchestrators.
+
+    `suffix` may be:
+      - a plain string ("bs_a3_rabi"), used as-is;
+      - a template containing any of {mode}, {a_or_b}, {alice_or_bob},
+        {filenum}, filled in from this panel's values;
+      - None, meaning "no suffix" (the caller supplies its own default).
+
+    Every analyze_* function routes through this, so the same template works
+    in all of them. Previously each function had its own copy of this logic
+    and they had drifted: analyze_spectroscopy and analyze_rabi accepted only
+    {mode}, so a template like "bs_{a_or_b}{mode}_spectroscopy" -- the form
+    used by analyze_t1/analyze_ramsey and shown in the README -- raised a bare
+    KeyError from str.format instead of working.
+    """
+    if suffix is None:
+        return ""
+    if not isinstance(suffix, str):
+        # e.g. a Path, or a value pulled from a config dict. Preserve the old
+        # behavior of passing it through rather than guessing.
+        return suffix
+    if "{" not in suffix:
+        return suffix
+    fields = {
+        "mode": mode,
+        "alice_or_bob": alice_or_bob or "",
+        "a_or_b": (alice_or_bob[0] if alice_or_bob else ""),
+        "filenum": filenum,
+    }
+    try:
+        return suffix.format(**fields)
+    except (KeyError, IndexError) as e:
+        raise ValueError(
+            f"suffix template {suffix!r} refers to {e}, which is not available here. "
+            f"Supported fields: {', '.join('{' + k + '}' for k in fields)}. "
+            f"If you meant a literal brace, double it: '{{{{' and '}}}}'."
+        ) from None
+
+
 def analyze_flattop_spectroscopy(
     filenums,
     modes,
@@ -1403,18 +1444,14 @@ def analyze_flattop_spectroscopy(
     results = []
     last_current = 0
 
+    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
         
         if suffix is None:
             current_suffix = f"bs_{alice_or_bob[0]}{mode}_spectroscopy"
-        elif "{" in str(suffix):
-            current_suffix = str(suffix).format(
-                alice_or_bob=alice_or_bob or "", mode=mode,
-                a_or_b=(alice_or_bob[0] if alice_or_bob else ""),
-            )
         else:
-            current_suffix = str(suffix)
+            current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
@@ -1712,13 +1749,8 @@ def analyze_flattop_rabi(
 
         if oldsuffix:
             current_suffix = f"bs_{alice_or_bob[0]}{mode}_rabi"
-        elif "{" in str(suffix):
-            current_suffix = str(suffix).format(
-                alice_or_bob=alice_or_bob or "", mode=mode,
-                a_or_b=(alice_or_bob[0] if alice_or_bob else ""),
-            )
         else:
-            current_suffix = str(suffix)
+            current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
@@ -2333,19 +2365,15 @@ def analyze_t1(
 
     results = []
 
+    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
 
         if suffix is None:
             a_or_b = (alice_or_bob[0] if alice_or_bob else "a")
             current_suffix = f"bs_{a_or_b}{mode}_t1"
-        elif "{" in str(suffix):
-            a_or_b = (alice_or_bob[0] if alice_or_bob else "")
-            current_suffix = str(suffix).format(
-                alice_or_bob=alice_or_bob or "", mode=mode, a_or_b=a_or_b
-            )
         else:
-            current_suffix = str(suffix)
+            current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
@@ -2573,6 +2601,7 @@ def analyze_ramsey(
 
     results = []
 
+    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
 
@@ -2580,13 +2609,8 @@ def analyze_ramsey(
         if suffix is None:
             a_or_b = (alice_or_bob[0] if alice_or_bob else "a")
             current_suffix = f"bs_{a_or_b}{mode}_{seq_str}"
-        elif "{" in str(suffix):
-            a_or_b = (alice_or_bob[0] if alice_or_bob else "")
-            current_suffix = str(suffix).format(
-                alice_or_bob=alice_or_bob or "", mode=mode, a_or_b=a_or_b
-            )
         else:
-            current_suffix = str(suffix)
+            current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
@@ -3042,7 +3066,15 @@ def analyze_spectroscopy(
     fig=None,
     ax=None,
     title=None,
+    alice_or_bob=None,
 ):
+    """
+    Fit and plot spectroscopy for one or more (filenum, mode) pairs in a grid.
+
+    See expand_suffix() for how `suffix` templates work; the same templates
+    are accepted by analyze_rabi, analyze_t1, analyze_ramsey, and the
+    analyze_flattop_* functions.
+    """
     if fit_overrides is None:
         fit_overrides = {}
     tasks = list(zip(filenums, modes))
@@ -3058,12 +3090,10 @@ def analyze_spectroscopy(
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n_files // 5 + 1)
     results = []
 
+    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
-        if "{" in str(suffix):
-            current_suffix = str(suffix).format(mode=mode)
-        else:
-            current_suffix = str(suffix)
+        current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
@@ -3128,18 +3158,13 @@ def analyze_spectroscopy(
 # =============================================================================
 # GENERIC RABI ORCHESTRATOR
 # =============================================================================
-def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overrides=None, fit_overrides=None, fig=None, ax=None, raise_on_failure=True, title=None, **kwargs):
+def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overrides=None, fit_overrides=None, fig=None, ax=None, raise_on_failure=True, title=None, alice_or_bob=None, **kwargs):
     """
     Fit and plot Rabi data for one or more (filenum, mode) pairs in a grid.
 
-    `suffix` selects the file(s) to load and works two ways:
-      - A plain string, e.g. suffix="bs_a3_rabi", is used as-is for every
-        panel. This is the old behavior and still works unchanged.
-      - A template string containing "{mode}", e.g. suffix="bs_a{mode}_rabi",
-        is formatted per panel using that panel's entry from `modes`, so one
-        call can sweep multiple files instead of calling this once per mode.
-    The same suffix convention is used by analyze_spectroscopy,
-    analyze_flattop_rabi, and analyze_flattop_spectroscopy.
+    See expand_suffix() for how `suffix` templates work; the same templates
+    are accepted by analyze_spectroscopy, analyze_t1, analyze_ramsey, and the
+    analyze_flattop_* functions.
     """
     if fit_overrides is None: fit_overrides = {}
     tasks = list(zip(filenums, modes))
@@ -3155,12 +3180,10 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n_files // 5 + 1)
     results = []
 
+    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
-        if "{" in str(suffix):
-            current_suffix = str(suffix).format(mode=mode)
-        else:
-            current_suffix = str(suffix)
+        current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
 
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)

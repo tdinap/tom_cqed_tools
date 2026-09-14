@@ -20,17 +20,27 @@ marimo edit interactive_tools/spectrum_vis_marimo.py
 
 ### `analyze_*` filename suffixes
 
-`analyze_rabi`, `analyze_spectroscopy`, `analyze_flattop_rabi`, and
-`analyze_flattop_spectroscopy` all take a `suffix` argument that controls
-which file each panel loads:
+`analyze_rabi`, `analyze_spectroscopy`, `analyze_t1`, `analyze_ramsey`,
+`analyze_flattop_rabi`, and `analyze_flattop_spectroscopy` all take a
+`suffix` argument that controls which file each panel loads:
 
 - A plain string (`suffix="bs_a3_rabi"`) is used as-is for every panel —
   this is the original behavior and needs no changes to existing notebooks.
-- A template containing `{mode}` (`suffix="bs_a{mode}_rabi"`) is filled in
-  per panel from the corresponding entry in `modes`, so one call can sweep
-  several files instead of calling the function once per mode.
+- A template is filled in per panel, so one call can sweep several files
+  instead of calling the function once per mode. Available fields:
 
-See the docstring on `analyze_rabi` for details.
+  | field | value |
+  |---|---|
+  | `{mode}` | that panel's entry from `modes` |
+  | `{filenum}` | that panel's entry from `filenums` |
+  | `{a_or_b}` | first letter of `alice_or_bob` (`"a"` / `"b"`) |
+  | `{alice_or_bob}` | the full `alice_or_bob` string |
+
+  e.g. `suffix="bs_{a_or_b}{mode}_spectroscopy"`.
+
+All six accept the same fields, so one template can be shared across them.
+A template referring to anything else raises a `ValueError` naming the bad
+field and listing the valid ones. See `expand_suffix()` for details.
 
 ## Linting
 
