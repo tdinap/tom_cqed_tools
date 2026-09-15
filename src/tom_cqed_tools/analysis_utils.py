@@ -1393,14 +1393,16 @@ def expand_suffix(suffix, mode=None, alice_or_bob=None, filenum=None):
         "mode": mode,
         "alice_or_bob": alice_or_bob or "",
         "a_or_b": (alice_or_bob[0] if alice_or_bob else ""),
-        "filenum": filenum,
+        # int when it looks like one, so "{filenum:05d}" works on "42" as well as 42
+        "filenum": int(filenum) if str(filenum).lstrip("-").isdigit() else filenum,
     }
     try:
         return suffix.format(**fields)
-    except (KeyError, IndexError) as e:
+    except (KeyError, IndexError, ValueError) as e:
         raise ValueError(
-            f"suffix template {suffix!r} refers to {e}, which is not available here. "
-            f"Supported fields: {', '.join('{' + k + '}' for k in fields)}. "
+            f"suffix template {suffix!r} could not be filled in: {e}. "
+            f"Supported fields: {', '.join('{' + k + '}' for k in fields)} "
+            f"(here mode={mode!r}, filenum={filenum!r}, alice_or_bob={alice_or_bob!r}). "
             f"If you meant a literal brace, double it: '{{{{' and '}}}}'."
         ) from None
 
