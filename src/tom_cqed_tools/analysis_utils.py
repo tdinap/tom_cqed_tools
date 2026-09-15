@@ -1373,26 +1373,19 @@ fit_spectroscopy_old = fit_lorentzian_spectroscopy
 # =============================================================================
 def expand_suffix(suffix, mode=None, alice_or_bob=None, filenum=None):
     """
-    Expand one panel's filename suffix for the analyze_* orchestrators.
+    Turn a suffix into the filename suffix for one panel.
 
-    `suffix` may be:
-      - a plain string ("bs_a3_rabi"), used as-is;
-      - a template containing any of {mode}, {a_or_b}, {alice_or_bob},
-        {filenum}, filled in from this panel's values;
-      - None, meaning "no suffix" (the caller supplies its own default).
+    "bs_a3_rabi"                    -> used as-is
+    "bs_{a_or_b}{mode}_rabi"        -> "bs_a3_rabi"   (mode=3, alice_or_bob="alice")
+    None                            -> ""
 
-    Every analyze_* function routes through this, so the same template works
-    in all of them. Previously each function had its own copy of this logic
-    and they had drifted: analyze_spectroscopy and analyze_rabi accepted only
-    {mode}, so a template like "bs_{a_or_b}{mode}_spectroscopy" -- the form
-    used by analyze_t1/analyze_ramsey and shown in the README -- raised a bare
-    KeyError from str.format instead of working.
+    Fields: {mode} {filenum} {a_or_b} {alice_or_bob}. Same in every analyze_*.
+    Check what a suffix will produce without running an analysis:
+        expand_suffix("bs_{a_or_b}{mode}_rabi", mode=3, alice_or_bob="alice")
     """
     if suffix is None:
         return ""
     if not isinstance(suffix, str):
-        # e.g. a Path, or a value pulled from a config dict. Preserve the old
-        # behavior of passing it through rather than guessing.
         return suffix
     if "{" not in suffix:
         return suffix
@@ -1444,7 +1437,6 @@ def analyze_flattop_spectroscopy(
     results = []
     last_current = 0
 
-    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
         
@@ -1456,7 +1448,7 @@ def analyze_flattop_spectroscopy(
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
-            ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
+            ax.text(0.5, 0.5, f"Not Found:\n{str(filenum).zfill(5)}_{current_suffix}.h5", ha="center", va="center", fontsize="small")
             ax.axis("off")
             continue
 
@@ -1755,7 +1747,7 @@ def analyze_flattop_rabi(
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
-            ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
+            ax.text(0.5, 0.5, f"Not Found:\n{str(filenum).zfill(5)}_{current_suffix}.h5", ha="center", va="center", fontsize="small")
             ax.axis("off")
             continue
 
@@ -2365,7 +2357,6 @@ def analyze_t1(
 
     results = []
 
-    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
 
@@ -2381,7 +2372,7 @@ def analyze_t1(
             ax.text(
                 0.5,
                 0.5,
-                f"File {filenum}\nMode {mode}\nNot Found",
+                f"Not Found:\n{str(filenum).zfill(5)}_{current_suffix}.h5",
                 ha="center",
                 va="center",
             )
@@ -2601,7 +2592,6 @@ def analyze_ramsey(
 
     results = []
 
-    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
 
@@ -3090,7 +3080,6 @@ def analyze_spectroscopy(
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n_files // 5 + 1)
     results = []
 
-    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
         current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
@@ -3098,7 +3087,7 @@ def analyze_spectroscopy(
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
-            ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
+            ax.text(0.5, 0.5, f"Not Found:\n{str(filenum).zfill(5)}_{current_suffix}.h5", ha="center", va="center", fontsize="small")
             ax.axis("off")
             continue
         freq = data.xpts / 1e9 if data.xpts.max() > 1e6 else data.xpts
@@ -3180,7 +3169,6 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n_files // 5 + 1)
     results = []
 
-    current_suffix = ""  # so the suptitle below is safe if filenums is empty
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
         current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
@@ -3188,7 +3176,7 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
         try:
             data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
-            ax.text(0.5, 0.5, f"File {filenum}\nMode {mode}\nNot Found", ha="center", va="center")
+            ax.text(0.5, 0.5, f"Not Found:\n{str(filenum).zfill(5)}_{current_suffix}.h5", ha="center", va="center", fontsize="small")
             ax.axis("off")
             continue
         t = data.xpts * 1e6 if data.xpts.max() < 1e-3 else data.xpts
