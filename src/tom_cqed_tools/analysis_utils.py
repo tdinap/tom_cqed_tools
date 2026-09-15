@@ -1430,8 +1430,6 @@ def analyze_flattop_spectroscopy(
     if fit_overrides is None:
         fit_overrides = {}
 
-    # zip stops at the shorter list on purpose: pass fewer modes than filenums
-    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n_files = len(tasks)
     ncols = int(np.ceil(np.sqrt(n_files)))
@@ -2353,8 +2351,6 @@ def analyze_t1(
     if fit_overrides is None:
         fit_overrides = {}
 
-    # zip stops at the shorter list on purpose: pass fewer modes than filenums
-    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n = len(tasks)
     ncols = int(np.ceil(np.sqrt(n)))
@@ -2590,8 +2586,6 @@ def analyze_ramsey(
     if fit_overrides is None:
         fit_overrides = {}
 
-    # zip stops at the shorter list on purpose: pass fewer modes than filenums
-    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n = len(tasks)
     ncols = int(np.ceil(np.sqrt(n)))
@@ -3105,8 +3099,6 @@ def analyze_spectroscopy(
     """
     if fit_overrides is None:
         fit_overrides = {}
-    # zip stops at the shorter list on purpose: pass fewer modes than filenums
-    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n_files = len(tasks)
     ncols = int(np.ceil(np.sqrt(n_files)))
@@ -3196,8 +3188,6 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
     analyze_flattop_* functions.
     """
     if fit_overrides is None: fit_overrides = {}
-    # zip stops at the shorter list on purpose: pass fewer modes than filenums
-    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n_files = len(tasks)
     ncols = int(np.ceil(np.sqrt(n_files)))
