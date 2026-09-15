@@ -1,4 +1,10 @@
 # tools for plotting and analyzing cavity resonators
+#
+# At the end of a cooldown, freeze this code so its plots stay reproducible:
+#     git tag cooldown-2026-09-14        # name it whatever the cooldown is
+# Then `git checkout cooldown-2026-09-14` gets that exact version back later.
+# save_plot() stamps the current tag/commit into every figure it writes, so a
+# figure always says which version made it -- see get_code_version().
 
 import copy
 import glob
@@ -1424,6 +1430,8 @@ def analyze_flattop_spectroscopy(
     if fit_overrides is None:
         fit_overrides = {}
 
+    # zip stops at the shorter list on purpose: pass fewer modes than filenums
+    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n_files = len(tasks)
     ncols = int(np.ceil(np.sqrt(n_files)))
@@ -2345,6 +2353,8 @@ def analyze_t1(
     if fit_overrides is None:
         fit_overrides = {}
 
+    # zip stops at the shorter list on purpose: pass fewer modes than filenums
+    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n = len(tasks)
     ncols = int(np.ceil(np.sqrt(n)))
@@ -2580,6 +2590,8 @@ def analyze_ramsey(
     if fit_overrides is None:
         fit_overrides = {}
 
+    # zip stops at the shorter list on purpose: pass fewer modes than filenums
+    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n = len(tasks)
     ncols = int(np.ceil(np.sqrt(n)))
@@ -3001,6 +3013,30 @@ def get_physical_cell(nb_path):
         return "Parse_Error"
 
 
+_CODE_VERSION = None
+
+
+def get_code_version():
+    """
+    Which version of this file is loaded, e.g. "cooldown-2026-09-14" if that
+    tag is checked out, else a commit like "7299965". A "-dirty" on the end
+    means there are uncommitted edits, so it matches no commit exactly.
+    Returns "unknown" outside a git checkout. Stamped into every save_plot.
+    """
+    global _CODE_VERSION
+    if _CODE_VERSION is None:
+        try:
+            _CODE_VERSION = subprocess.check_output(
+                ["git", "describe", "--tags", "--always", "--dirty"],
+                cwd=Path(__file__).resolve().parent,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip() or "unknown"
+        except Exception:
+            _CODE_VERSION = "unknown"
+    return _CODE_VERSION
+
+
 def get_notebook_context(data_files=None):
     """Gathers context, including physical cell location."""
     try:
@@ -3019,7 +3055,7 @@ def get_notebook_context(data_files=None):
         files_str = ""
 
     nb_name = Path(nb_path).name if nb_path else "Unknown_Notebook"
-    return f"Notebook: {nb_name} | {physical_loc}{files_str}"
+    return f"Notebook: {nb_name} | {physical_loc}{files_str} | Code: {get_code_version()}"
 
 
 def save_plot(fname, fig=None, data_files=None, **kwargs):
@@ -3069,6 +3105,8 @@ def analyze_spectroscopy(
     """
     if fit_overrides is None:
         fit_overrides = {}
+    # zip stops at the shorter list on purpose: pass fewer modes than filenums
+    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n_files = len(tasks)
     ncols = int(np.ceil(np.sqrt(n_files)))
@@ -3158,6 +3196,8 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
     analyze_flattop_* functions.
     """
     if fit_overrides is None: fit_overrides = {}
+    # zip stops at the shorter list on purpose: pass fewer modes than filenums
+    # to analyze just the first few, without trimming the filenum list.
     tasks = list(zip(filenums, modes))
     n_files = len(tasks)
     ncols = int(np.ceil(np.sqrt(n_files)))
