@@ -1,10 +1,8 @@
 # tools for plotting and analyzing cavity resonators
 #
-# At the end of a cooldown, freeze this code so its plots stay reproducible:
-#     git tag cooldown-2026-09-14        # name it whatever the cooldown is
-# Then `git checkout cooldown-2026-09-14` gets that exact version back later.
-# save_plot() stamps the current tag/commit into every figure it writes, so a
-# figure always says which version made it -- see get_code_version().
+# save_plot() records which copy of this file made each figure, in the image
+# metadata (not drawn on the plot): a commit if imported from the git checkout,
+# otherwise the path it was imported from. See get_code_version().
 
 import copy
 import glob
@@ -3012,22 +3010,24 @@ _CODE_VERSION = None
 
 def get_code_version():
     """
-    Which version of this file is loaded, e.g. "cooldown-2026-09-14" if that
-    tag is checked out, else a commit like "7299965". A "-dirty" on the end
-    means there are uncommitted edits, so it matches no commit exactly.
-    Returns "unknown" outside a git checkout. Stamped into every save_plot.
+    Which copy of this file you actually imported. Stamped into every save_plot.
+
+    Imported from the git checkout -> a commit, e.g. "7299965" ("-dirty" means
+    there were uncommitted edits, so it matches no commit exactly).
+    Imported from a copy somewhere else -> that copy's full path.
     """
     global _CODE_VERSION
     if _CODE_VERSION is None:
+        here = Path(__file__).resolve()
         try:
             _CODE_VERSION = subprocess.check_output(
                 ["git", "describe", "--tags", "--always", "--dirty"],
-                cwd=Path(__file__).resolve().parent,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            ).strip() or "unknown"
+                cwd=here.parent, stderr=subprocess.DEVNULL, text=True,
+            ).strip()
         except Exception:
-            _CODE_VERSION = "unknown"
+            _CODE_VERSION = ""
+        if not _CODE_VERSION:
+            _CODE_VERSION = str(here)
     return _CODE_VERSION
 
 
