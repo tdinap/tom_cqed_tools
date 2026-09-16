@@ -1464,30 +1464,17 @@ def analyze_flattop_spectroscopy(
         current = data.exp.get("flux_current", 0)
         last_current = current
         
-        ramp_len = 0
-        if f"bs_{alice_or_bob}_ramp_lens" in data.q0:
-            ramp_len = data.q0[f"bs_{alice_or_bob}_ramp_lens"].get(mode, 0)
-        elif f"sb_{alice_or_bob}_ramp_lens" in data.q0:
-            ramp_len = data.q0[f"sb_{alice_or_bob}_ramp_lens"].get(mode, 0)
-            
-        ramp_len *= 1e6
-            
-        len_raw = data.exp.get("bs_length") or data.exp.get("sb_length")
-        
+        ramp_len = data.q0[f"bs_{alice_or_bob}_ramp_lens"][mode] * 1e6
+        len_raw = data.exp.get("bs_length")
+
         if len_raw in (None, "None"):
-            if f"bs_{alice_or_bob}_flat_lens" in data.q0:
-                flat_len = data.q0[f"bs_{alice_or_bob}_flat_lens"].get(mode, 0) * 1e6
-            elif f"sb_{alice_or_bob}_flat_lens" in data.q0:
-                flat_len = data.q0[f"sb_{alice_or_bob}_flat_lens"].get(mode, 0) * 1e6
-            else:
-                flat_len = 2.0  # fallback
+            flat_len = data.q0[f"bs_{alice_or_bob}_flat_lens"][mode] * 1e6
         else:
             flat_len = len_raw * 1e6 - 2 * ramp_len
 
-        amp = data.exp.get("bs_amplitude") or data.exp.get("sb_amplitude")
+        amp = data.exp.get("bs_amplitude")
         if amp in (None, "None"):
-            amp = data.q0.get(f"bs_{alice_or_bob}_amps", {}).get(mode, 
-                  data.q0.get(f"sb_{alice_or_bob}_amps", {}).get(mode, 0))
+            amp = data.q0[f"bs_{alice_or_bob}_amps"][mode]
 
         current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
@@ -1760,16 +1747,13 @@ def analyze_flattop_rabi(
         time = data.xpts * 1e6
         y = data.P_e
 
-        freq = data.q0.get(f"bs_{alice_or_bob}_freqs", {}).get(mode, 
-               data.q0.get(f"sb_{alice_or_bob}_freqs", {}).get(mode, 0)) / 1e9
-               
-        amp = data.exp.get("bs_amplitude") or data.exp.get("sb_amplitude")
+        freq = data.q0[f"bs_{alice_or_bob}_freqs"][mode] / 1e9
+
+        amp = data.exp.get("bs_amplitude")
         if amp in (None, "None"):
-            amp = data.q0.get(f"bs_{alice_or_bob}_amps", {}).get(mode, 
-                  data.q0.get(f"sb_{alice_or_bob}_amps", {}).get(mode, 0))
-                  
-        drive_range = data.q0.get(f"bs_{alice_or_bob}_dBm_ranges", {}).get(mode, 
-                      data.q0.get(f"sb_{alice_or_bob}_dBm_ranges", {}).get(mode, 0))
+            amp = data.q0[f"bs_{alice_or_bob}_amps"][mode]
+
+        drive_range = data.q0[f"bs_{alice_or_bob}_dBm_ranges"][mode]
 
         current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
