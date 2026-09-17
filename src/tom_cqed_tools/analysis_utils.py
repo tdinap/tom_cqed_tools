@@ -2147,7 +2147,7 @@ def analyze_bangbang(
     ncols = int(np.ceil(np.sqrt(n_files)))
     nrows = int(np.ceil(n_files / ncols)) if ncols > 0 else 1
     if fig is None or ax is None:
-        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows]) * 1.4
         fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
     else:
         axs = np.atleast_1d(ax)
