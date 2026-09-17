@@ -13,6 +13,7 @@ dependencies = [
     "numpy",
     "scipy",
     "matplotlib",
+    "plotly",
     "pandas",
     "tabulate",
     "marimo",
