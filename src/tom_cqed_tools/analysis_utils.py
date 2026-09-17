@@ -2711,11 +2711,7 @@ def fit_ramsey(t, y, is_echo=False, custom_settings=None):
         except Exception:
             guess_f = 1.0 / t_span
 
-    if is_echo:
-        guess_f = 0.0
-        params["f"].set(value=0.0, vary=False)
-    else:
-        params["f"].set(value=guess_f, min=0.0, max=max(50.0 / dt if dt > 0 else 100.0, 10.0))
+    params["f"].set(value=guess_f, min=0.0, max=max(50.0 / dt if dt > 0 else 100.0, 10.0))
 
     params["A"].set(value=rough_A, min=-2.5, max=2.5)
     params["T2"].set(value=rough_T2, min=0.01, max=max(50.0 * t_span, 1e6))
@@ -2871,7 +2867,7 @@ def analyze_ramsey(
             lbl = (
                 rf"$T_2^* = {format_err(t2_val, t2_err)}\ \mu s$"
                 if not is_echo
-                else rf"$T_2 = {format_err(t2_val, t2_err)}\ \mu s$"
+                else rf"$T_{{2,E}} = {format_err(t2_val, t2_err)}\ \mu s$"
             )
             if not is_echo:
                 lbl += "\n" + rf"$f = {format_err(f_val, f_err)}$ MHz"
