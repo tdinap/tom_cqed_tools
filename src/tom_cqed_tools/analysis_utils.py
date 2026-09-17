@@ -1412,6 +1412,7 @@ def expand_suffix(suffix, mode=None, alice_or_bob=None, filenum=None):
 
 
 def analyze_flattop_spectroscopy(
+    *,
     filenums,
     modes,
     data_path,
@@ -1421,6 +1422,11 @@ def analyze_flattop_spectroscopy(
     fit_overrides=None,
     plotfits=True,
     plotfills=True,
+    show_info=True,
+    pulse="bs",
+    fig=None,
+    ax=None,
+    title=None,
 ):
     if fit_overrides is None:
         fit_overrides = {}
@@ -1429,8 +1435,11 @@ def analyze_flattop_spectroscopy(
     n_files = len(tasks)
     ncols = int(np.ceil(np.sqrt(n_files)))
     nrows = int(np.ceil(n_files / ncols)) if ncols > 0 else 1
-    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
-    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
     axs = axs.flatten()
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n_files // 5 + 1)
 
@@ -1439,17 +1448,18 @@ def analyze_flattop_spectroscopy(
 
     for ii, (filenum, mode) in enumerate(tasks):
         ax, c = axs[ii], colors[ii]
-        suffix = f"bs_{alice_or_bob[0]}{mode}_spectroscopy" if suffix is None else suffix
+        current_suffix = f"bs_{alice_or_bob[0]}{mode}_spectroscopy" if suffix is None else expand_suffix(suffix, mode, alice_or_bob, filenum)
 
         try:
-            data = LabData(data_path, filenum=filenum, suffix=suffix)
+            data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
             ax.text(
                 0.5,
                 0.5,
-                f"File {filenum}\nMode {mode}\nNot Found",
+                f"Not Found:\n{str(filenum).zfill(5)}_{current_suffix}.h5",
                 ha="center",
                 va="center",
+                fontsize="small",
             )
             ax.axis("off")
             continue
@@ -1461,18 +1471,21 @@ def analyze_flattop_spectroscopy(
         last_current = current
         average_exponent = data.exp.get("average_exponent", 0)
 
-        bs_ramp_len = data.q0[f"bs_{alice_or_bob}_ramp_lens"][mode] * 1e6
-        bs_len_raw = data.exp.get("bs_length")
+        bs_ramp_len = data.q0[f"{pulse}_{alice_or_bob}_ramp_lens"][mode] * 1e6
+        bs_len_raw = data.exp.get(f"{pulse}_length")
 
         if bs_len_raw in (None, "None"):
-            bs_flat_len = data.q0[f"bs_{alice_or_bob}_flat_lens"][mode] * 1e6
+            bs_flat_len = data.q0[f"{pulse}_{alice_or_bob}_flat_lens"][mode] * 1e6
         else:
             bs_flat_len = bs_len_raw * 1e6 - 2 * bs_ramp_len
 
-        bs_range = data.q0[f"bs_{alice_or_bob}_dBm_ranges"][mode]
-        bs_amp = data.exp.get("bs_amplitude")
+        if pulse == "bs":
+            bs_range = data.q0[f"bs_{alice_or_bob}_dBm_ranges"][mode]
+        else:
+            bs_range = data.q0[f"sb_{alice_or_bob}_dBm_range"]
+        bs_amp = data.exp.get(f"{pulse}_amplitude")
         if bs_amp in (None, "None"):
-            bs_amp = data.q0[f"bs_{alice_or_bob}_amps"][mode]
+            bs_amp = data.q0[f"{pulse}_{alice_or_bob}_amps"][mode]
 
         current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
@@ -1564,26 +1577,27 @@ def analyze_flattop_spectroscopy(
             )
 
         # Text Block
-        info_text = (
-            f"range = {bs_range} dBm\n"
-            f"amp = {bs_amp:.4f}\n"
-            rf"$t_{{BSflat}}$ = {bs_flat_len:.3f} $\mu$s" + "\n"
-            rf"$t_{{BSramp}}$ = {bs_ramp_len:.3f} $\mu$s" + "\n"
-            rf"$\nu_{{bs}} = {format_err(bs_freq, bs_freq_err)}$ GHz" + "\n"
-            rf"n_avgs = $2^{{{average_exponent}}}$" + "\n"
-            rf"Flux = {flux:.3f} $\Phi_0$"
-        )
+        if show_info:
+            info_text = (
+                f"range = {bs_range} dBm\n"
+                f"amp = {bs_amp:.4f}\n"
+                rf"$t_{{BSflat}}$ = {bs_flat_len:.3f} $\mu$s" + "\n"
+                rf"$t_{{BSramp}}$ = {bs_ramp_len:.3f} $\mu$s" + "\n"
+                rf"$\nu_{{bs}} = {format_err(bs_freq, bs_freq_err)}$ GHz" + "\n"
+                rf"n_avgs = $2^{{{average_exponent}}}$" + "\n"
+                rf"Flux = {flux:.3f} $\Phi_0$"
+            )
 
-        props = dict(boxstyle="round", facecolor="white", alpha=0, edgecolor="none")
-        ax.text(
-            0.05,
-            0.05,
-            info_text,
-            transform=ax.transAxes,
-            fontsize="x-small",
-            verticalalignment="bottom",
-            bbox=props,
-        )
+            props = dict(boxstyle="round", facecolor="white", alpha=0, edgecolor="none")
+            ax.text(
+                0.05,
+                0.05,
+                info_text,
+                transform=ax.transAxes,
+                fontsize="x-small",
+                verticalalignment="bottom",
+                bbox=props,
+            )
 
         ax.set(xlabel="Frequency (GHz)", ylabel="$P_e$")
         ax.tick_params(axis="x", rotation=30)
@@ -1597,12 +1611,11 @@ def analyze_flattop_spectroscopy(
 
     # Delete unused axes
     for idx in range(len(tasks), len(axs)):
-        fig.delaxes(axs[idx])
+        axs[idx].set_visible(False)
 
-    fig.suptitle(
-        rf"Beamsplitter spectroscopy {alice_or_bob.capitalize()}. Current={last_current * 1e3:.3f} mA",
-        y=1.02,
-    )
+    if title is None:
+        title = rf"Beamsplitter spectroscopy {alice_or_bob.capitalize()}. Current={last_current * 1e3:.3f} mA"
+    fig.suptitle(title, y=1.02)
     plt.tight_layout()
 
     return pd.DataFrame(results), fig
@@ -1767,6 +1780,7 @@ def fit_rabi_heated(t, y, pi_guess, custom_settings=None, yerr=None):
 # 3. THE MAIN ORCHESTRATOR
 # =============================================================================
 def analyze_flattop_rabi(
+    *,
     file_mode_pairs,
     startfits,
     pi_times_fit,
@@ -1780,7 +1794,12 @@ def analyze_flattop_rabi(
     plotfits=True,
     plotfills=True,
     plotlines=True,
-    yerr=None
+    show_info=True,
+    pulse="bs",
+    yerr=None,
+    fig=None,
+    ax=None,
+    title=None,
 ):
     if fit_overrides is None:
         fit_overrides = {}
@@ -1792,8 +1811,11 @@ def analyze_flattop_rabi(
     n = len(tasks)
     ncols = int(np.ceil(np.sqrt(n)))
     nrows = int(np.ceil(n / ncols)) if ncols > 0 else 1
-    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows]) * 1.4
-    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    if fig is None or ax is None:
+        figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows]) * 1.4
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    else:
+        axs = np.atleast_1d(ax)
     axs = axs.flatten()
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"] * (n // 5 + 1)
 
@@ -1805,17 +1827,20 @@ def analyze_flattop_rabi(
 
         # --- 1. Load Data via LabData (Assumed defined globally) ---
         if oldsuffix:
-            suffix = f"bs_{alice_or_bob[0]}{mode}_rabi"
+            current_suffix = f"bs_{alice_or_bob[0]}{mode}_rabi"
+        else:
+            current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
         
         try:
-            data = LabData(data_path, filenum=filenum, suffix=suffix)
+            data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
             ax.text(
                 0.5,
                 0.5,
-                f"File {filenum}\nMode {mode}\nNot Found",
+                f"Not Found:\n{str(filenum).zfill(5)}_{current_suffix}.h5",
                 ha="center",
                 va="center",
+                fontsize="small",
             )
             ax.axis("off")
             continue
@@ -1823,13 +1848,16 @@ def analyze_flattop_rabi(
         time = data.xpts * 1e6
         y = data.P_e
 
-        bs_freq = data.q0[f"bs_{alice_or_bob}_freqs"][mode] / 1e9
+        bs_freq = data.q0[f"{pulse}_{alice_or_bob}_freqs"][mode] / 1e9
         bs_amp = (
-            data.exp.get("bs_amplitude")
-            if data.exp.get("bs_amplitude") not in (None, "None")
-            else data.q0[f"bs_{alice_or_bob}_amps"][mode]
+            data.exp.get(f"{pulse}_amplitude")
+            if data.exp.get(f"{pulse}_amplitude") not in (None, "None")
+            else data.q0[f"{pulse}_{alice_or_bob}_amps"][mode]
         )
-        bs_drive_range = data.q0[f"bs_{alice_or_bob}_dBm_ranges"][mode]
+        if pulse == "bs":
+            bs_drive_range = data.q0[f"bs_{alice_or_bob}_dBm_ranges"][mode]
+        else:
+            bs_drive_range = data.q0[f"sb_{alice_or_bob}_dBm_range"]
 
         current = data.exp.get("flux_current", 0)
         flux = flux_from_current(current, 73.1561e-3, -2.7060e-3)
@@ -1851,10 +1879,16 @@ def analyze_flattop_rabi(
         t_fit, y_fit = time[start_idx:], y[start_idx:]
 
         # --- 3. Fit ---
-        if heated_fit:
-            result = fit_rabi_heated(t_fit, y_fit, pi_guess, custom_settings=current_settings)
-        else:
-            result = fit_bs_rabi(t_fit, y_fit, pi_guess, custom_settings=current_settings)
+        try:
+            if heated_fit:
+                result = fit_rabi_heated(t_fit, y_fit, pi_guess, custom_settings=current_settings)
+            else:
+                result = fit_bs_rabi(t_fit, y_fit, pi_guess, custom_settings=current_settings)
+        except Exception as e:
+            print(f"Rabi fit failed for file {filenum}: {e}")
+            ax.plot(time, y, marker="o", linestyle="", color=c)
+            ax.set_title(f"file {filenum}: fit failed", fontsize="small")
+            continue
 
         # --- 4. Parameter and Standard Error Extraction ---
         v = result.values
@@ -2007,32 +2041,33 @@ def analyze_flattop_rabi(
             )
 
         # --- Text Box for Metadata ---
-        info_text = (
-            rf"$\nu_{{bs}}$ = {bs_freq:.5f} GHz" + "\n"
-            f"amp = {bs_amp:.4f}\n"
-            f"range = {bs_drive_range} dBm\n"
-            f"Current = {current * 1e3:.3f} mA\n"
-            rf"Flux = {flux:.3f} $\Phi_0$" + "\n"
-            rf"n_avgs = $2^{{{average_exponent}}}$"
-        )
+        if show_info:
+            info_text = (
+                rf"$\nu_{{bs}}$ = {bs_freq:.5f} GHz" + "\n"
+                f"amp = {bs_amp:.4f}\n"
+                f"range = {bs_drive_range} dBm\n"
+                f"Current = {current * 1e3:.3f} mA\n"
+                rf"Flux = {flux:.3f} $\Phi_0$" + "\n"
+                rf"n_avgs = $2^{{{average_exponent}}}$"
+            )
 
-        props = dict(
-            boxstyle="round",
-            facecolor="white",
-            alpha=0.8,
-            edgecolor="lightgray",
-            linewidth=1,
-        )
-        ax.text(
-            0.05,
-            0.05,
-            info_text,
-            transform=ax.transAxes,
-            fontsize="x-small",
-            verticalalignment="center",
-            horizontalalignment="right",
-            bbox=props,
-        )
+            props = dict(
+                boxstyle="round",
+                facecolor="white",
+                alpha=0.8,
+                edgecolor="lightgray",
+                linewidth=1,
+            )
+            ax.text(
+                0.05,
+                0.05,
+                info_text,
+                transform=ax.transAxes,
+                fontsize="x-small",
+                verticalalignment="bottom",
+                horizontalalignment="left",
+                bbox=props,
+            )
 
         ax.set(xlabel=r"t ($\mu s$)", ylabel="$P_e$")
         ax.set_xlim(-time.max() * 0.1, time.max() * 1.1)
@@ -2044,10 +2079,12 @@ def analyze_flattop_rabi(
         ax.legend(fontsize="small", title=axtitle, loc="upper right")
 
     for idx in range(len(tasks), len(axs)):
-        fig.delaxes(axs[idx])
+        axs[idx].set_visible(False)
 
     # Removed current from suptitle
-    fig.suptitle(f"Beamsplitter Rabi {alice_or_bob.capitalize()}", y=1.02, fontsize=32)
+    if title is None:
+        title = f"Beamsplitter Rabi {alice_or_bob.capitalize()}"
+    fig.suptitle(title, y=1.02, fontsize=32)
     plt.tight_layout()
 
     return pd.DataFrame(results), fig
@@ -2087,6 +2124,7 @@ def fit_bangbang(n_fit, y_fit, custom_settings=None):
 # 3. ORCHESTRATOR (Powered by LabData)
 # =============================================================================
 def analyze_bangbang(
+    *,
     filenums,
     startfits,
     modes,
@@ -2132,13 +2170,14 @@ def analyze_bangbang(
         ax, c = axs[ii], colors[ii]
 
         # --- Clean I/O ---
+        current_suffix = expand_suffix(suffix, mode, alice_or_bob, filenum)
         try:
-            data = LabData(data_path, filenum=filenum, suffix=suffix)
+            data = LabData(data_path, filenum=filenum, suffix=current_suffix)
         except FileNotFoundError:
             ax.text(
                 0.5,
                 0.5,
-                f"File {filenum}\nMode {mode}\nNot Found",
+                f"Not Found:\n{str(filenum).zfill(5)}_{current_suffix}.h5",
                 ha="center",
                 va="center",
             )
@@ -2455,6 +2494,7 @@ def fit_t1(t, y, custom_settings=None):
 
 
 def analyze_t1(
+    *,
     filenums,
     modes,
     data_path,
@@ -2508,7 +2548,7 @@ def analyze_t1(
         y = data.P_e
 
         current = data.exp.get("flux_current", 0)
-        flux = data.q0.get("flux", 0.0)
+        flux = data.q0.get("flux", np.nan)
 
         current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
@@ -2590,6 +2630,7 @@ def analyze_t1(
 
         info_lines = []
         info_lines.append(rf"$T_1 = {format_err(t1_val, t1_err)}\ \mu$s")
+        info_lines.append(f"Current = {current * 1e3:.3f} mA")
         info_lines.append(rf"Flux = {flux:.3f} $\Phi_0$")
         red_chi2 = getattr(result, "redchi", np.nan) if result else np.nan
         if not np.isnan(red_chi2):
@@ -2689,6 +2730,7 @@ def fit_ramsey(t, y, is_echo=False, custom_settings=None):
 
 
 def analyze_ramsey(
+    *,
     filenums,
     modes,
     data_path,
@@ -2755,7 +2797,7 @@ def analyze_ramsey(
         y = data.P_e
 
         current = data.exp.get("flux_current", 0)
-        flux = data.q0.get("flux", 0.0)
+        flux = data.q0.get("flux", np.nan)
 
         current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
@@ -3196,6 +3238,7 @@ def save_plot(fname, fig=None, data_files=None, **kwargs):
 # GENERIC SPECTROSCOPY ORCHESTRATOR
 # =============================================================================
 def analyze_spectroscopy(
+    *,
     filenums,
     modes,
     data_path,
@@ -3244,7 +3287,7 @@ def analyze_spectroscopy(
         freq = data.xpts / 1e9 if data.xpts.max() > 1e6 else data.xpts
         y = data.P_e
         current = data.exp.get("flux_current", 0)
-        flux = data.q0.get("flux", 0.0)
+        flux = data.q0.get("flux", np.nan)
 
         current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
@@ -3298,7 +3341,7 @@ def analyze_spectroscopy(
 # =============================================================================
 # GENERIC RABI ORCHESTRATOR
 # =============================================================================
-def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overrides=None, fit_overrides=None, fig=None, ax=None, raise_on_failure=True, title=None, alice_or_bob=None, **kwargs):
+def analyze_rabi(*, filenums, modes, data_path, suffix, pi_guess=2.0, global_overrides=None, fit_overrides=None, fig=None, ax=None, raise_on_failure=True, title=None, alice_or_bob=None, **kwargs):
     """
     Fit and plot Rabi data for one or more (filenum, mode) pairs in a grid.
 
@@ -3333,7 +3376,7 @@ def analyze_rabi(filenums, modes, data_path, suffix, pi_guess=2.0, global_overri
         t = data.xpts * 1e6 if data.xpts.max() < 1e-3 else data.xpts
         y = data.P_e
         current = data.exp.get("flux_current", 0)
-        flux = data.q0.get("flux", 0.0)
+        flux = data.q0.get("flux", np.nan)
         
         current_settings = copy.deepcopy(global_overrides) if global_overrides else {}
         specific_overrides = fit_overrides.get((filenum, mode), {})
@@ -3450,6 +3493,7 @@ def load_bf_channel(file_paths, column_name):
 # ORCHESTRATOR
 # =============================================================================
 def analyze_bs_heating_population(
+    *,
     filenum_pairs,
     heating_modes,
     swap_modes,
@@ -3770,6 +3814,7 @@ def analyze_bs_spectroscopy(*args, **kwargs):
 def analyze_sb_spectroscopy(*args, **kwargs):
     """Alias for Sideband Spectroscopy."""
     kwargs.setdefault('title', "Sideband Spectroscopy")
+    kwargs.setdefault('pulse', "sb")
     return analyze_flattop_spectroscopy(*args, **kwargs)
 
 def analyze_transmon_spectroscopy(*args, **kwargs):
@@ -3792,6 +3837,7 @@ def analyze_bs_rabi(*args, **kwargs):
 def analyze_sb_rabi(*args, **kwargs):
     """Alias for Sideband Rabi."""
     kwargs.setdefault('title', "Sideband Rabi")
+    kwargs.setdefault('pulse', "sb")
     return analyze_flattop_rabi(*args, **kwargs)
 
 def analyze_transmon_rabi(*args, **kwargs):
