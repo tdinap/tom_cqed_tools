@@ -1645,12 +1645,14 @@ def format_err(val, err):
         return r"\infty" if np.isinf(val) else "NaN"
 
     if pd.isna(err) or err is None or err == 0 or np.isinf(err):
-        return f"{val:.4g}"
+        return rf"{val:.6g} \pm ?"
 
+    # same rule as sigfig.round(val, err, cutoff=29): 2 sig figs on the error if it starts with 10-29, else 1
     err_order = np.floor(np.log10(abs(err)))
-    err_rounded = np.round(err, -int(err_order - 1))
-    val_rounded = np.round(val, -int(err_order - 1))
-    decimals = max(0, -int(err_order - 1))
+    sig = 2 if round(abs(err) / 10 ** (err_order - 1)) <= 29 else 1
+    err_rounded = np.round(err, -int(err_order - sig + 1))
+    val_rounded = np.round(val, -int(err_order - sig + 1)) + 0.0  # + 0.0 turns -0 into 0
+    decimals = max(0, -int(err_order - sig + 1))
 
     return rf"{val_rounded:.{decimals}f} \pm {err_rounded:.{decimals}f}"
 
