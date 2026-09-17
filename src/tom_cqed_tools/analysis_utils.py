@@ -1416,7 +1416,7 @@ def analyze_flattop_spectroscopy(
     filenums,
     modes,
     data_path,
-    alice_or_bob="alice",
+    alice_or_bob,
     suffix=None,
     global_overrides=None,
     fit_overrides=None,
@@ -1787,8 +1787,8 @@ def analyze_flattop_rabi(
     startfits,
     pi_times_fit,
     data_path,
-    alice_or_bob="alice",
-    suffix="bs_bob_3_rabi_with_sb",
+    alice_or_bob,
+    suffix=None,
     oldsuffix=False, #band-aid for now, we should find a more elegant solution
     global_overrides=None,
     fit_overrides=None,
@@ -1803,6 +1803,8 @@ def analyze_flattop_rabi(
     ax=None,
     title=None,
 ):
+    if suffix is None and not oldsuffix:
+        raise ValueError('analyze_flattop_rabi needs suffix=..., e.g. suffix="bs_{a_or_b}{mode}_rabi"')
     if fit_overrides is None:
         fit_overrides = {}
 
@@ -2132,8 +2134,8 @@ def analyze_bangbang(
     modes,
     data_path,
     fit_mode="both",
-    alice_or_bob="alice",
-    suffix="bs_b3_bangbang",
+    alice_or_bob,
+    suffix,
     global_overrides=None,
     fit_overrides=None,
     plot_2d=False,
@@ -3813,6 +3815,8 @@ def analyze_sb_spectroscopy(*args, **kwargs):
     """Alias for Sideband Spectroscopy."""
     kwargs.setdefault('title', "Sideband Spectroscopy")
     kwargs.setdefault('pulse', "sb")
+    if kwargs.get('suffix') is None:
+        raise ValueError("analyze_sb_spectroscopy needs suffix=... (otherwise it would look for the beamsplitter file name)")
     return analyze_flattop_spectroscopy(*args, **kwargs)
 
 def analyze_transmon_spectroscopy(*args, **kwargs):
@@ -3836,6 +3840,8 @@ def analyze_sb_rabi(*args, **kwargs):
     """Alias for Sideband Rabi."""
     kwargs.setdefault('title', "Sideband Rabi")
     kwargs.setdefault('pulse', "sb")
+    if kwargs.get('suffix') is None or kwargs.get('oldsuffix'):
+        raise ValueError("analyze_sb_rabi needs suffix=... and no oldsuffix (otherwise it would look for the beamsplitter file name)")
     return analyze_flattop_rabi(*args, **kwargs)
 
 def analyze_transmon_rabi(*args, **kwargs):
