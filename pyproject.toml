@@ -45,6 +45,10 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+# Lets tests import functions straight out of the marimo notebooks.
+pythonpath = ["."]
+
 [tool.ruff.lint]
 # Only bug-catching checks (undefined names, unused/duplicate imports, unused
 # locals). No style/formatting rules -- this repo's style is hand-chosen, not

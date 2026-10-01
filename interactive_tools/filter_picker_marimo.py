@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.15"
+__generated_with = "0.24.2"
 app = marimo.App(width="full")
 
 
@@ -27,29 +27,27 @@ def imports():
 
 @app.cell
 def intro(mo):
-    mo.md(
-        """
-        <style>
-        /* marimo's default heading face is Lora; this notebook uses the UI sans.
-           Scoped to this notebook, so the others keep whatever they have.
-           marimo's own .markdown rule outranks a bare h1, hence !important. */
-        .markdown h1, .markdown h2, .markdown h3, .markdown h4,
-        h1, h2, h3, h4 {
-            font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif !important;
-        }
-        </style>
+    mo.md("""
+    <style>
+    /* marimo's default heading face is Lora; this notebook uses the UI sans.
+       Scoped to this notebook, so the others keep whatever they have.
+       marimo's own .markdown rule outranks a bare h1, hence !important. */
+    .markdown h1, .markdown h2, .markdown h3, .markdown h4,
+    h1, h2, h3, h4 {
+        font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif !important;
+    }
+    </style>
 
-        # Drive-line filter picker
+    # Drive-line filter picker
 
-        A drive at $f_d$ dresses every mode, so line noise at $|f_m - n f_d|$ is
-        converted straight into that mode.  Those frequencies, and the bare mode
-        frequencies, are what the filter has to **reject** while still **passing**
-        $f_d$.
+    A drive at $f_d$ dresses every mode, so line noise at $|f_m - n f_d|$ is
+    converted straight into noise at $f_m$.  Those frequencies, and the bare mode
+    frequencies, are what the filter has to **reject** while still **passing**
+    $f_d$.
 
-        Edit the two boxes, pick which drives you actually run, and the bottom
-        table is the spec to shop with.
-        """
-    )
+    Edit the two boxes, pick which drives you actually run, and the bottom
+    table is the spec to shop with.
+    """)
     return
 
 
@@ -152,13 +150,20 @@ def parse_inputs(drives_box, mo, modes_box, sb):
         label="Drives in play:", full_width=True,
     )
     mo.vstack(([mo.md(f"**{parse_error}**")] if parse_error else []) + [pick_ui])
-    return all_modes, drive_labels, parse_error, pick_ui
+    return all_modes, drive_labels, pick_ui
 
 
 @app.cell
 def compute(
-    all_modes, drive_labels, guard_abs_ui, guard_mode_ui, guard_pct_ui,
-    margin_ui, order_ui, pick_ui, sb,
+    all_modes,
+    drive_labels,
+    guard_abs_ui,
+    guard_mode_ui,
+    guard_pct_ui,
+    margin_ui,
+    order_ui,
+    pick_ui,
+    sb,
 ):
     """CELL 7: the whole calculation."""
     drives = [drive_labels[k] for k in pick_ui.value]
@@ -253,7 +258,7 @@ def figure(analysed, band_of, bands, go, guard_fn, sb):
     fig.update_xaxes(gridcolor="#e1e0d9", zeroline=False, range=[0, x_hi])
     fig.update_yaxes(gridcolor="#e1e0d9", tickfont=dict(color=MUTED))
     fig
-    return (fig,)
+    return
 
 
 @app.cell
