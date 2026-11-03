@@ -12,6 +12,7 @@ import os
 
 import h5py
 import jax.numpy as jnp
+import lmfit
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -3868,3 +3869,494 @@ def analyze_transmon_rabi(*args, **kwargs):
     """Alias for Transmon Rabi."""
     kwargs.setdefault('title', "Transmon Rabi")
     return analyze_rabi(*args, **kwargs)
+
+
+# =============================================================================
+# BEAMSPLITTER RABI: MATRIX PENCIL, FLOQUET ENVELOPE, LU, LU + AMP NOISE
+# Moved out of fits_and_plots_Tom_claudefix1.ipynb on 2026-11-03.
+# The fit math is copied unchanged from the notebook. Every change is marked
+# with a "CHANGED:" comment so it can be checked against the notebook.
+#
+# Two one-call functions:
+#   analyze_bs_mpm(...)   matrix pencil on each trace -> table of terms, fit figure, residual figure
+#   analyze_bs_fits(...)  Floquet envelope fit (seeded by MPM), Lu formula fit, and Lu + sigma_g fit
+#                         on each trace -> one table, fit figure, residual figure
+# =============================================================================
+def matrix_pencil_rabi(t, y, num_modes=None, pencil_param=None, max_modes=10):
+    """
+    Matrix pencil fit of y(t) = sum_k a_k exp(lam_k t), with lam_k = -gamma_k + i*omega_k.
+    The constant offset is just one of the poles (lam ~ 0), so num_modes COUNTS it.
+    num_modes=None picks the number of poles by BIC (same criterion as the lmfit stage).
+    Use this for model order and seeds only; final numbers come from fit_bs_floquet.
+    Returns (eval_fit, df): one df row per physical term (a cosine's +/- frequency twins are merged).
+    """
+    t = np.asarray(t, float).flatten()
+    y = np.asarray(y, float).flatten()
+    ok = np.isfinite(t) & np.isfinite(y)
+    t, y = t[ok], y[ok]
+    t, keep = np.unique(t, return_index=True)
+    y = y[keep]
+    N = len(y)
+
+    # MPM needs a uniform grid. Interpolating is fine here because MPM only seeds the final fit.
+    t_u = np.linspace(t[0], t[-1], N)
+    y_u = np.interp(t_u, t, y)
+    dt = t_u[1] - t_u[0]
+
+    # Hankel matrix -> SVD -> shift invariance -> poles z_k
+    L = pencil_param or N // 3
+    Y = np.lib.stride_tricks.sliding_window_view(y_u, L + 1)  # Y[i, j] = y[i + j]
+    _, s, Vh = np.linalg.svd(Y, full_matrices=False)
+
+    def poles_and_amps(M):
+        V = Vh[:M].T
+        z = np.linalg.eigvals(np.linalg.pinv(V[:-1]) @ V[1:]).astype(complex)
+        lam = np.log(z) / dt
+        # amplitudes by linear least squares on the raw (non-interpolated) data
+        X = np.exp(np.outer(t - t[0], lam))
+        a = np.linalg.lstsq(X, y, rcond=None)[0]
+        rss = np.sum((y - np.real(X @ a)) ** 2)
+        return lam, a, rss
+
+    # model order: BIC = N ln(RSS/N) + k ln N, with k = 2 real parameters per pole
+    # (real exp: rate + amplitude; cosine pair: rate, freq, amplitude, phase)
+    if num_modes is None:
+        bic = [N * np.log(poles_and_amps(M)[2] / N) + 2 * M * np.log(N) for M in range(1, max_modes + 1)]
+        num_modes = int(np.argmin(bic)) + 1
+    print(f"MPM num_modes = {num_modes}; singular values / s0:", np.round(s[:10] / s[0], 4))
+
+    lam, a, _ = poles_and_amps(num_modes)
+    a = a * np.exp(-lam * t[0])  # refer amplitudes to t = 0
+
+    # one row per physical term; the negative-frequency twin of each cosine is dropped
+    T = t[-1] - t[0]
+    rows = []
+    for k in range(len(lam)):
+        f = lam[k].imag / (2 * np.pi)
+        if f < 0:
+            continue
+        if f * T >= 1:
+            name = "Cosine"
+        elif abs(lam[k].real) * T < 0.1:
+            name = "DC Offset"
+        elif f == 0:
+            name = "Exp"
+        else:
+            name = "Slow pair"  # < 1 period in the record: really two unresolved real exps
+        rows.append(
+            {
+                "Mode": name,
+                "Freq (MHz)": f,
+                "Decay (us^-1)": -lam[k].real,  # negative = growing: red flag, num_modes too big
+                "Amplitude": (2 if f > 0 else 1) * abs(a[k]),  # cosine amplitude for pairs
+                "Phase (rad)": np.angle(a[k]),  # 0 or pi for real terms = sign of the exp
+            }
+        )
+    df_params = pd.DataFrame(rows)
+
+    def eval_fit(t_eval):
+        return np.real(np.exp(np.outer(np.asarray(t_eval), lam)) @ a)
+
+    return eval_fit, df_params
+
+
+def bs_floquet_model(t, p, n_modes=4):
+    """Floquet envelope model. CHANGED: was called `model` in the notebook (too generic a name here)."""
+    v = p.valuesdict()
+    y = v["Pss"] + sum(
+        v[f"A{m}"] * np.exp(v[f"lam{m}"] * t) for m in range(1, n_modes + 1)
+    )
+    Omega = 2.0 * v["gbs"]
+    return y + 2.0 * np.exp(-v["Gamma_ab"] * t) * (
+        v["Cx"] * np.cos(Omega * t) + v["Cy"] * np.sin(Omega * t)
+    )
+
+
+def guess_gbs(t, y, frac=0.05):
+    tu = np.linspace(t[0], t[-1], t.size)
+    y = np.interp(tu, t, y)
+    t, dt = tu, tu[1] - tu[0]
+    w = max(3, int(frac * t.size) | 1)
+    d = (y - np.convolve(y, np.ones(w) / w, mode="same"))[w // 2 : y.size - w // 2]
+    f = np.fft.rfftfreq(d.size, dt)
+    amp = np.abs(np.fft.rfft(d * np.hanning(d.size)))
+    amp[0] = 0.0
+    return np.pi * f[np.argmax(amp)]
+
+
+def fit_bs_floquet(t, P, lam0, A0, gbs=None, fix_gbs=False, floor=None, n_shots=None):
+    """lam0, A0: seeds for the real exponentials (from MPM), slowest rate first.
+    Rates are ordered by construction: lam_m = lam_{m-1} - d_m with d_m >= 0.
+    floor: readout floor; if given, imposes Pbar(0) - 2*Cx = floor.
+    n_shots: shots per point; if given, residuals are weighted by binomial sigma = sqrt(P(1-P)/n_shots).
+    CHANGED: was called `fit` in the notebook. n_shots is new; n_shots=None gives exactly the notebook fit."""
+    t, P = np.asarray(t, float), np.asarray(P, float)
+    ok = np.isfinite(t) & np.isfinite(P)
+    t, P = t[ok], P[ok]
+    t, keep = np.unique(t, return_index=True)
+    P = P[keep]
+    span = t[-1] - t[0]
+    head, tail = max(5, t.size // 50), max(5, t.size // 20)
+    n_modes = len(lam0)
+
+    p = lmfit.Parameters()
+    p.add("lam1", value=lam0[0], max=-1e-9)
+    for m in range(2, n_modes + 1):
+        p.add(f"d{m}", value=lam0[m - 2] - lam0[m - 1], min=0)  # gap to the previous rate
+        p.add(f"lam{m}", expr=f"lam{m - 1} - d{m}")
+    for m in range(1, n_modes + 1):
+        p.add(f"A{m}", value=A0[m - 1])
+    p.add("Cx", value=max(0.25 * np.ptp(P[:head]), 1e-3))
+    p.add("Cy", value=0.0)
+    p.add("Gamma_ab", value=2.0 / span, min=1e-9)
+    p.add("gbs", value=gbs if gbs else guess_gbs(t, P), min=0.0, vary=not fix_gbs)
+    A_sum = " + ".join(f"A{m}" for m in range(1, n_modes + 1))
+    if floor is None:
+        p.add("Pss", value=P[-tail:].mean())
+    else:
+        p.add("Pss", expr=f"{floor} + 2*Cx - ({A_sum})")  # Pbar(0) - 2Cx = floor
+
+    # CHANGED: optional binomial weights (w = 1 when n_shots is None, same as the notebook)
+    Pc = np.clip(P, 0.01, 0.99)
+    w = 1 / np.sqrt(Pc * (1 - Pc) / n_shots) if n_shots else 1.0
+    res = lmfit.minimize(lambda q, t, y: (bs_floquet_model(t, q, n_modes) - y) * w, p, args=(t, P))
+    v = res.params
+    lam = np.array([v[f"lam{m}"].value for m in range(1, n_modes + 1)])  # already slowest first
+    A = np.array([v[f"A{m}"].value for m in range(1, n_modes + 1)])
+
+    # gap significance: d / stderr < 2 (or no stderr) means those two modes are not resolved
+    gap_sig = [
+        v[f"d{m}"].value / v[f"d{m}"].stderr if v[f"d{m}"].stderr else 0.0
+        for m in range(2, n_modes + 1)
+    ]
+
+    # quantities the fidelity needs: best-fit values only (error bars come from repeat traces, not the fit)
+    u = v.valuesdict()
+    tbs = np.pi / (2 * u["gbs"])
+    Pbar_tbs = u["Pss"] + sum(u[f"A{m}"] * np.exp(u[f"lam{m}"] * tbs) for m in range(1, n_modes + 1))
+    contrast_tbs = np.exp(-u["Gamma_ab"] * tbs)
+
+    # Andre's fidelity F = 1/2 (2 sum_m A_m e^{lam_m t} + e^{-Gamma_ab t}) at t = tbs. The sum includes Pss.
+    # It assumes ideal readout (Pbar(0) = 1/2). With readout P_meas = a + b P, the population term
+    # 2 Pbar(t) becomes (Pbar(t) - a) / (Pbar(0) - a) = 1 + (Pbar(t) - Pbar(0)) / (2 Cx),
+    # using Pbar(0) - a = 2 Cx. This equals 1 at t = 0 for any readout, and reduces to 2 Pbar(t) when a = 0, b = 1.
+    Pbar0 = u["Pss"] + sum(u[f"A{m}"] for m in range(1, n_modes + 1))
+    N_tbs = 1 + (Pbar_tbs - Pbar0) / (2 * u["Cx"])
+    F_tbs = 0.5 * (N_tbs + contrast_tbs)
+    F_raw = 0.5 * (2 * Pbar_tbs + contrast_tbs)  # Andre's formula on raw P_e, no readout correction
+
+    return dict(
+        Pss=v["Pss"].value,
+        lam=lam,
+        A=A,
+        Gamma_ab=v["Gamma_ab"].value,
+        C0=np.hypot(v["Cx"].value, v["Cy"].value),
+        theta0=np.arctan2(v["Cy"].value, v["Cx"].value),
+        gbs=v["gbs"].value,
+        tbs=np.pi / (2.0 * v["gbs"].value),
+        floor_check=v["Pss"].value + A.sum() - 2 * v["Cx"].value,  # should match the readout floor
+        gap_sig=gap_sig,
+        Pbar_tbs=Pbar_tbs,
+        contrast_tbs=contrast_tbs,
+        F_tbs=F_tbs,
+        F_raw=F_raw,
+        result=res,
+    )
+
+
+def bs_decay_func_gauss(t, A, k1, k2, gbs, B, phase, sigma_g):
+    """Lu formula (bs_decay_func_with_phase) plus quasistatic amplitude noise.
+    If g is Gaussian-distributed shot to shot (mean gbs, std sigma_g) and frozen within each shot,
+    averaging cos(2 g t) over shots gives exp(-2 sigma_g^2 t^2) cos(2 gbs t). Only the contrast term gets it.
+    sigma_g is in the same units as gbs (rad/us). sigma_g/gbs = fractional pump-amplitude noise, since g ~ xi."""
+    contrast = np.exp(-k2 * t) * np.exp(-2 * sigma_g**2 * t**2)
+    return (A / 2) * np.exp(-k1 * t) * (1 + contrast * np.cos(2 * gbs * t + phase)) + B
+
+
+def fit_rabi_gauss(t, y, lu_params, yerr=None):
+    """Fit bs_decay_func_gauss, starting from a finished Lu fit (fit_rabi_with_phase).
+    lu_params: the Lu fit's .params. Their values, bounds and fixed/free flags are copied over,
+    so if A and B were fixed in the Lu fit they stay fixed here."""
+    model = Model(bs_decay_func_gauss)
+    params = model.make_params()
+    for name in ["A", "k1", "k2", "gbs", "B", "phase"]:
+        p = lu_params[name]
+        params[name].set(value=p.value, min=p.min, max=p.max, vary=p.vary)
+    params["sigma_g"].set(value=0.05 * abs(lu_params["gbs"].value), min=0)  # small but nonzero start
+    weights = 1 / np.asarray(yerr) if yerr is not None else None
+    return model.fit(y, params, t=t, weights=weights)
+
+
+def _bs_fidelity_gauss(k1, k2, sigma_g, gbs):
+    """Same as _bs_fidelity, with the extra Gaussian factor on the contrast term."""
+    tbs = 0.5 * np.pi / gbs
+    return 0.5 * (np.exp(-k1 * tbs) + np.exp(-(k1 + k2) * tbs) * np.exp(-2 * sigma_g**2 * tbs**2))
+
+
+def analyze_bs_mpm(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_or_b}{mode}_rabi", num_modes=None):
+    """
+    Matrix pencil on each beamsplitter Rabi trace. Same fit and legend as the notebook's MPM cells.
+
+    filenums, modes: one entry per trace, e.g. filenums=[20, 25], modes=[1, 2]
+    num_modes: None = chosen by BIC per trace; an int forces it (it counts the DC offset)
+    Returns (df, fig, fig_res): df has one row per MPM term, fig has data + MPM curve,
+    fig_res has data - MPM curve (structure there means the MPM is missing a term).
+    CHANGED vs notebook: the lmfit comparison is gone from here (it lives in analyze_bs_fits),
+    the legend shows the real number of terms instead of "None modes", and there is a residual figure.
+    """
+    tasks = list(zip(filenums, modes))
+    ncols = int(np.ceil(np.sqrt(len(tasks))))
+    nrows = int(np.ceil(len(tasks) / ncols))
+    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    fig_res, axs_res = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    axs, axs_res = axs.flatten(), axs_res.flatten()
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    all_dfs = []
+
+    for ii, (filenum, mode) in enumerate(tasks):
+        data = LabData(data_path, filenum=filenum, suffix=expand_suffix(suffix, mode, alice_or_bob, filenum))
+        time = np.asarray(data.xpts, float).flatten() * 1e6
+        if "P_e" in data.data_dict:
+            y, ylabel = np.asarray(data.P_e, float).flatten(), r"$P_e$"
+        else:
+            y, ylabel = np.asarray(data.avgi, float).flatten(), "I"
+        valid = ~np.isnan(y)
+        time, y = time[valid], y[valid]
+        time, unique_indices = np.unique(time, return_index=True)
+        y = y[unique_indices]
+        pair = f"{alice_or_bob[0]}{mode}"
+
+        eval_fit, df_params = matrix_pencil_rabi(time, y, num_modes=num_modes)
+        df_params.insert(0, "FileNum", filenum)
+        df_params.insert(1, "BS pair", pair)
+        all_dfs.append(df_params)
+
+        # legend: pick out the base decay (k1), the Rabi cosine (k1 + k2), and a heating term, as in the notebook
+        actual_modes = df_params[df_params["Mode"] != "DC Offset"].sort_values(by="Amplitude", ascending=False)
+        label = f"MPM fit ({len(df_params)} terms)\n"
+        labeled = set()
+        gamma_base = 0
+        base = actual_modes[(actual_modes["Freq (MHz)"] < 0.01) & (np.abs(actual_modes["Phase (rad)"]) < np.pi / 2)]
+        if len(base) > 0:
+            gamma_base = base.iloc[0]["Decay (us^-1)"]
+            T1_mpm = 1 / gamma_base if gamma_base > 1e-6 else np.inf
+            label += f"  $k_1$={gamma_base:.4f} ($T_1\\approx${T1_mpm:.1f} $\\mu s$)\n"
+            labeled.add(base.iloc[0].name)
+        rabi = actual_modes[actual_modes["Freq (MHz)"] > 0.05]
+        if len(rabi) > 0:
+            gamma_rabi = rabi.iloc[0]["Decay (us^-1)"]
+            f_rabi = rabi.iloc[0]["Freq (MHz)"]
+            k2_mpm = gamma_rabi - gamma_base
+            T2_mpm = 1 / k2_mpm if k2_mpm > 1e-6 else np.inf
+            pi_time_mpm = 1 / (2 * f_rabi) if f_rabi > 1e-6 else np.inf
+            fid_mpm = 0.5 * (np.exp(-gamma_base * pi_time_mpm) + np.exp(-gamma_rabi * pi_time_mpm))
+            label += f"  $k_2$={k2_mpm:.4f} ($T_\\phi\\approx${T2_mpm:.1f} $\\mu s$)\n"
+            label += f"  $f_{{rabi}}$={f_rabi:.4f} MHz\n"
+            label += f"  Fid$\\approx${fid_mpm:.4f}\n"
+            labeled.add(rabi.iloc[0].name)
+        heat = actual_modes[(actual_modes["Freq (MHz)"] < 0.01) & (np.abs(actual_modes["Phase (rad)"]) > np.pi / 2)]
+        if len(heat) > 0:
+            gamma_heat = heat.iloc[0]["Decay (us^-1)"]
+            Theat_mpm = 1 / gamma_heat if gamma_heat > 1e-6 else np.inf
+            label += f"  $k_{{heat}}$={gamma_heat:.4f} ($T_{{heat}}\\approx${Theat_mpm:.1f} $\\mu s$)\n"
+            labeled.add(heat.iloc[0].name)
+        if len(actual_modes) > 0:
+            max_amp = actual_modes["Amplitude"].max()
+            for idx, row in actual_modes.iterrows():
+                if idx not in labeled and row["Amplitude"] > 0.05 * max_amp:
+                    label += f"  Other: f={row['Freq (MHz)']:.4f}, $k$={row['Decay (us^-1)']:.4f}\n"
+
+        c = colors[ii % len(colors)]
+        ax = axs[ii]
+        ax.plot(time, y, "o", color=c, markerfacecolor=to_rgba(c, 0.25), markeredgecolor=c, ms=8, label="data")
+        time_fine = np.linspace(time[0], time[-1], 1000)
+        ax.plot(time_fine, eval_fit(time_fine), c="black", lw=2.5, label=label.strip())
+        ax.set(xlabel=r"t ($\mu s$)", ylabel=ylabel)
+        ax.set_title(f"File {filenum} ({pair})", fontsize="small")
+        ax.legend(fontsize="small", loc="upper right")
+
+        ax = axs_res[ii]
+        resid = y - eval_fit(time)
+        ax.plot(time, resid, ".", color=c, label=f"rms = {np.sqrt(np.mean(resid**2)):.4f}")
+        ax.axhline(0, color="0.5", lw=1)
+        ax.set(xlabel=r"t ($\mu s$)", ylabel=f"{ylabel} - MPM")
+        ax.set_title(f"File {filenum} ({pair})", fontsize="small")
+        ax.legend(fontsize="small", loc="upper right")
+
+    for idx in range(len(tasks), len(axs)):
+        axs[idx].set_visible(False)
+        axs_res[idx].set_visible(False)
+    fig.suptitle(f"{alice_or_bob.capitalize()} BS Rabi, matrix pencil")
+    fig.tight_layout()
+    fig_res.suptitle(f"{alice_or_bob.capitalize()} BS Rabi, matrix pencil residuals")
+    fig_res.tight_layout()
+    return pd.concat(all_dfs, ignore_index=True), fig, fig_res
+
+
+def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_or_b}{mode}_rabi",
+                    num_modes=None, n_env=None, floor=None, n_shots=None, lu_settings=None):
+    """
+    Three fits on each beamsplitter Rabi trace, side by side:
+      Floquet envelope fit (seeded by matrix pencil; black)   -> F_tbs, F_raw
+      Lu formula fit, fit_rabi_with_phase (red dashed)         -> F_lu
+      Lu formula + quasistatic amp noise sigma_g (blue dotted) -> F_gauss, sigma_g
+
+    num_modes: MPM model order (None = BIC). Only used to seed the Floquet fit.
+    n_env: number of exps in the Floquet fit (None = pick 1..3 by BIC; an extra exp must lower BIC by > 6)
+    floor: readout floor for the Floquet fit (None = free)
+    n_shots: shots per point. If given, all three fits are weighted by sqrt(P(1-P)/n_shots),
+             so reduced chi^2 ~ 1 means shot-noise limited. If None, fits are unweighted and
+             reduced chi^2 is only good for comparing the three fits on the same trace.
+    lu_settings: extra settings for the Lu fit, e.g. {"A": {"value": 1, "vary": False}}.
+             Whatever is fixed in the Lu fit is also fixed in the Lu + sigma_g fit.
+
+    Returns (df, fig, fig_res). df has one row per trace. The last columns (t, y, floquet, lu, gauss)
+    hold the data and fit objects for follow-up plots; drop them before displaying:
+        display(df.drop(columns=["t", "y", "floquet", "lu", "gauss"]))
+    """
+    lu_settings = lu_settings or {}
+    tasks = list(zip(filenums, modes))
+    ncols = int(np.ceil(np.sqrt(len(tasks))))
+    nrows = int(np.ceil(len(tasks) / ncols))
+    figsize = np.array(plt.rcParams["figure.figsize"]) * np.array([ncols, nrows])
+    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    fig_res, axs_res = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    axs, axs_res = axs.flatten(), axs_res.flatten()
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    rows = []
+
+    for ii, (filenum, mode) in enumerate(tasks):
+        data = LabData(data_path, filenum=filenum, suffix=expand_suffix(suffix, mode, alice_or_bob, filenum))
+        time = np.asarray(data.xpts, float).flatten() * 1e6
+        if "P_e" in data.data_dict:
+            y, ylabel = np.asarray(data.P_e, float).flatten(), r"$P_e$"
+        else:
+            y, ylabel = np.asarray(data.avgi, float).flatten(), "I"
+        # CHANGED: NaNs and duplicate times are removed once here, so all three fits see the same points
+        valid = ~np.isnan(y)
+        time, y = time[valid], y[valid]
+        time, unique_indices = np.unique(time, return_index=True)
+        y = y[unique_indices]
+        pair = f"{alice_or_bob[0]}{mode}"
+
+        # seed the fringe with the strongest MPM cosine
+        _, df_mpm = matrix_pencil_rabi(time, y, num_modes=num_modes)
+        osc = df_mpm[df_mpm["Mode"] == "Cosine"].sort_values("Amplitude", ascending=False)
+        gbs_guess = np.pi * osc["Freq (MHz)"].iloc[0] if len(osc) else None
+
+        # seeds (rate, signed amplitude) for the real exps, biggest first. A slow pair is
+        # two unresolved exps, so it becomes two seeds on either side of its rate.
+        ex = df_mpm[df_mpm["Mode"].isin(["Exp", "Slow pair"])]
+        ex = ex[ex["Amplitude"] > 0.02 * df_mpm["Amplitude"].max()]
+        seeds = []
+        for _, row in ex.sort_values("Amplitude", ascending=False).iterrows():
+            g, A = row["Decay (us^-1)"], row["Amplitude"] * np.cos(row["Phase (rad)"])
+            seeds += [(0.5 * g, A / 2), (1.5 * g, A / 2)] if row["Mode"] == "Slow pair" else [(g, A)]
+        if not seeds:
+            seeds = [(1.0 / (time[-1] - time[0]), 0.1)]
+
+        # Floquet envelope fit: try 1..3 exps; an extra exp has to lower the BIC by more than 6 to be kept
+        tries = [n_env] if n_env else range(1, min(len(seeds), 3) + 1)
+        r = None
+        for n in tries:
+            s_n = sorted(seeds[:n])  # slowest rate first
+            r_n = fit_bs_floquet(time, y, lam0=[-g for g, _ in s_n], A0=[A for _, A in s_n],
+                                 gbs=gbs_guess, floor=floor, n_shots=n_shots)
+            if r is None or r_n["result"].bic < r["result"].bic - 6:
+                r = r_n
+        n_used = len(r["lam"])
+
+        # Lu formula fit. Its contrast decays as exp(-(k1+k2) t), so the fidelity uses k1 + k2 (_bs_fidelity)
+        yc = np.clip(y, 0.01, 0.99)
+        sigma = np.sqrt(yc * (1 - yc) / n_shots) if n_shots else None  # same weights as the Floquet fit
+        lu = fit_rabi_with_phase(time, y, pi_guess=2.0,
+                                 custom_settings={"gbs": {"value": gbs_guess or r["gbs"]}, **lu_settings}, yerr=sigma)
+        u_lu = lu.params.valuesdict()
+        F_lu = float(_bs_fidelity((u_lu["k1"], u_lu["k2"], abs(u_lu["gbs"]))))
+
+        # Lu + sigma_g, started from the Lu fit
+        gauss = fit_rabi_gauss(time, y, lu.params, yerr=sigma)
+        u_g = gauss.params.valuesdict()
+        F_gauss = _bs_fidelity_gauss(u_g["k1"], u_g["k2"], u_g["sigma_g"], abs(u_g["gbs"]))
+
+        # fit panel
+        tf = np.linspace(time.min(), time.max(), 1000)
+        Pbar = r["Pss"] + sum(A * np.exp(l * tf) for A, l in zip(r["A"], r["lam"]))
+        C = 2 * r["C0"] * np.exp(-r["Gamma_ab"] * tf)
+        c = colors[ii % len(colors)]
+        ax = axs[ii]
+        ax.plot(time, y, "o", ms=7, color=c, markerfacecolor=to_rgba(c, 0.25), markeredgecolor=c, label="data")
+        ax.plot(tf, bs_floquet_model(tf, r["result"].params, n_used), "k-", lw=2, label="Floquet envelope fit")
+        ax.plot(tf, lu.eval(t=tf), "r--", lw=1.5, label="Lu formula fit")
+        ax.plot(tf, gauss.eval(t=tf), "b:", lw=1.5, label=r"Lu + $\sigma_g$ fit")
+        ax.plot(tf, Pbar, "--", color="0.35", lw=1.5, label=r"$\bar{P}(t)$")
+        ax.plot(tf, Pbar + C, ":", color="0.35", lw=1.2)
+        ax.plot(tf, Pbar - C, ":", color="0.35", lw=1.2, label=r"$\bar{P} \pm \mathcal{C}$")
+        ax.set(xlabel=r"t ($\mu s$)", ylabel=ylabel)
+        ax.set_title(f"File {filenum} ({pair})", fontsize="small")
+        ax.legend(
+            fontsize="small", loc="upper right", title_fontsize="small",
+            title=(
+                f"$g_{{bs}}/\\pi$={r['gbs'] / np.pi:.4f} MHz   $t_{{bs}}$={r['tbs']:.3f} $\\mu s$\n"
+                f"$\\Gamma_{{\\alpha\\beta}}$={r['Gamma_ab']:.4f}   $\\lambda_1$={r['lam'][0]:+.4f}\n"
+                f"$\\sigma_g/g$={u_g['sigma_g'] / abs(u_g['gbs']):.2%}\n"
+                f"F = {r['F_tbs']:.4f} (Floquet), {F_lu:.4f} (Lu), {F_gauss:.4f} (Lu+$\\sigma_g$)"
+            ),
+        )
+
+        # residual panel: structure here means a wrong model or a bad minimum.
+        # A Gaussian envelope starts flat and an exponential starts with a slope, so look at early times.
+        ax = axs_res[ii]
+        ax.plot(time, y - bs_floquet_model(time, r["result"].params, n_used), "k.", ms=3,
+                label=f"Floquet, redchi = {r['result'].redchi:.3g}")
+        ax.plot(time, y - lu.eval(t=time), "r.", ms=3, alpha=0.5, label=f"Lu, redchi = {lu.redchi:.3g}")
+        ax.plot(time, y - gauss.eval(t=time), "b.", ms=3, alpha=0.5,
+                label=rf"Lu + $\sigma_g$, redchi = {gauss.redchi:.3g}")
+        ax.axhline(0, color="0.5", lw=1)
+        ax.set(xlabel=r"t ($\mu s$)", ylabel=f"{ylabel} residual")
+        ax.set_title(f"File {filenum} ({pair})", fontsize="small")
+        ax.legend(fontsize="small", loc="upper right")
+
+        rows.append(dict(
+            FileNum=filenum,
+            pair=pair,
+            n_env=n_used,
+            gbs_over_2pi_MHz=r["gbs"] / (2 * np.pi),  # CHANGED: column was "gbs" in the notebook; same number
+            tbs_us=r["tbs"],
+            Gamma_ab=r["Gamma_ab"],
+            **{f"A{m + 1}": A for m, A in enumerate(r["A"])},
+            **{f"lam{m + 1}": l for m, l in enumerate(r["lam"])},
+            C0=r["C0"],
+            theta0=r["theta0"],
+            Pss=r["Pss"],
+            floor_check=r["floor_check"],
+            gap_sig=np.round(r["gap_sig"], 1),
+            Pbar_tbs=r["Pbar_tbs"],
+            contrast_tbs=r["contrast_tbs"],
+            F_tbs=r["F_tbs"],
+            F_raw=r["F_raw"],
+            F_lu=F_lu,
+            F_gauss=F_gauss,
+            k1_lu=u_lu["k1"],
+            k2_lu=u_lu["k2"],
+            k1_gauss=u_g["k1"],
+            k2_gauss=u_g["k2"],
+            sigma_g=u_g["sigma_g"],
+            sigma_g_err=gauss.params["sigma_g"].stderr,  # huge or None when sigma_g sits at 0: nothing detected
+            sigma_g_over_g=u_g["sigma_g"] / abs(u_g["gbs"]),
+            redchi=r["result"].redchi,
+            redchi_lu=lu.redchi,
+            redchi_gauss=gauss.redchi,
+            bic=r["result"].bic,
+            t=time, y=y, floquet=r, lu=lu, gauss=gauss,
+        ))
+
+    for idx in range(len(tasks), len(axs)):
+        axs[idx].set_visible(False)
+        axs_res[idx].set_visible(False)
+    fig.suptitle(f"{alice_or_bob.capitalize()} BS Rabi: Floquet envelope vs Lu vs Lu + amp noise")
+    fig.tight_layout()
+    fig_res.suptitle(f"{alice_or_bob.capitalize()} BS Rabi residuals")
+    fig_res.tight_layout()
+    return pd.DataFrame(rows), fig, fig_res
