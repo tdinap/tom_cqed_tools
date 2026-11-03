@@ -1104,6 +1104,26 @@ def dbm_to_volts(dbm, Z=50):
 def watts_to_dbm(watts):
     return 10 * np.log10(watts) + 30
 
+def iq_rotate(avgi, avgq):
+    model = LinearModel()
+    params = model.guess(avgq, x=avgi)
+    result = model.fit(avgq, params, x=avgi)
+    theta = -np.arctan2(result.params["slope"].value, 1)
+    R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+
+    return R @ np.array([avgi, avgq])
+
+def rotatedIQ(freqs,I,Q):
+    phase = np.arctan2(Q,I)
+    unwrapped_phase = np.unwrap(phase)
+    p = dsf.fitlinear(freqs, unwrapped_phase,showfit = False)
+    phi = p[0] + p[1]*freqs
+
+    I_rot = I*np.cos(-phi) + Q*np.sin(-phi)
+    Q_rot = -I*np.sin(-phi) + Q*np.cos(-phi)
+
+    return I_rot, Q_rot
+
 
 class LabData:
     """
