@@ -1120,8 +1120,8 @@ def rotatedIQ(freqs,I,Q):
     p = dsf.fitlinear(freqs, unwrapped_phase,showfit = False)
     phi = p[0] + p[1]*freqs
 
-    I_rot = I*np.cos(-phi) + Q*np.sin(-phi)
-    Q_rot = -I*np.sin(-phi) + Q*np.cos(-phi)
+    I_rot = I*np.cos(phi) + Q*np.sin(phi)
+    Q_rot = -I*np.sin(phi) + Q*np.cos(phi)
 
     return I_rot, Q_rot
 
@@ -4082,7 +4082,7 @@ def fit_rabi_gauss(t, y, lu_params, yerr=None):
     for name in ["A", "k1", "k2", "gbs", "B", "phase"]:
         p = lu_params[name]
         params[name].set(value=p.value, min=p.min, max=p.max, vary=p.vary)
-    params["sigma_g"].set(value=0.05 * abs(lu_params["gbs"].value), min=0)  # small but nonzero start
+    params["sigma_g"].set(value=0.05 * abs(lu_params["gbs"].value), min=0, max=abs(lu_params["gbs"].value))  # start small; cap at 100% of g
     weights = 1 / np.asarray(yerr) if yerr is not None else None
     return model.fit(y, params, t=t, weights=weights)
 
@@ -4093,12 +4093,13 @@ def _bs_fidelity_gauss(k1, k2, sigma_g, gbs):
     return 0.5 * (np.exp(-k1 * tbs) + np.exp(-(k1 + k2) * tbs) * np.exp(-2 * sigma_g**2 * tbs**2))
 
 
-def analyze_bs_mpm(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_or_b}{mode}_rabi", num_modes=None):
+def analyze_bs_mpm(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_or_b}{mode}_rabi", num_modes=None, xlim=None):
     """
     Matrix pencil on each beamsplitter Rabi trace. Same fit and legend as the notebook's MPM cells.
 
     filenums, modes: one entry per trace, e.g. filenums=[20, 25], modes=[1, 2]
     num_modes: None = chosen by BIC per trace; an int forces it (it counts the DC offset)
+    xlim: e.g. (0, 30) to zoom in on the first oscillations; None = whole trace
     Returns (df, fig, fig_res): df has one row per MPM term, fig has data + MPM curve,
     fig_res has data - MPM curve (structure there means the MPM is missing a term).
     CHANGED vs notebook: the lmfit comparison is gone from here (it lives in analyze_bs_fits),
@@ -4132,16 +4133,17 @@ def analyze_bs_mpm(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_or
         df_params.insert(1, "BS pair", pair)
         all_dfs.append(df_params)
 
-        # legend: pick out the base decay (k1), the Rabi cosine (k1 + k2), and a heating term, as in the notebook
+        # panel title: pick out the base decay (k1), the Rabi cosine (k1 + k2), and a heating term, as in the notebook.
+        # The full list of terms is in the returned table.
         actual_modes = df_params[df_params["Mode"] != "DC Offset"].sort_values(by="Amplitude", ascending=False)
-        label = f"MPM fit ({len(df_params)} terms)\n"
+        parts = []
         labeled = set()
         gamma_base = 0
         base = actual_modes[(actual_modes["Freq (MHz)"] < 0.01) & (np.abs(actual_modes["Phase (rad)"]) < np.pi / 2)]
         if len(base) > 0:
             gamma_base = base.iloc[0]["Decay (us^-1)"]
             T1_mpm = 1 / gamma_base if gamma_base > 1e-6 else np.inf
-            label += f"  $k_1$={gamma_base:.4f} ($T_1\\approx${T1_mpm:.1f} $\\mu s$)\n"
+            parts.append(f"$k_1$={gamma_base:.4f} ($T_1\\approx${T1_mpm:.1f} $\\mu s$)")
             labeled.add(base.iloc[0].name)
         rabi = actual_modes[actual_modes["Freq (MHz)"] > 0.05]
         if len(rabi) > 0:
@@ -4151,51 +4153,52 @@ def analyze_bs_mpm(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_or
             T2_mpm = 1 / k2_mpm if k2_mpm > 1e-6 else np.inf
             pi_time_mpm = 1 / (2 * f_rabi) if f_rabi > 1e-6 else np.inf
             fid_mpm = 0.5 * (np.exp(-gamma_base * pi_time_mpm) + np.exp(-gamma_rabi * pi_time_mpm))
-            label += f"  $k_2$={k2_mpm:.4f} ($T_\\phi\\approx${T2_mpm:.1f} $\\mu s$)\n"
-            label += f"  $f_{{rabi}}$={f_rabi:.4f} MHz\n"
-            label += f"  Fid$\\approx${fid_mpm:.4f}\n"
+            parts.append(f"$k_2$={k2_mpm:.4f} ($T_\\phi\\approx${T2_mpm:.1f} $\\mu s$)")
+            parts.append(f"$f_{{rabi}}$={f_rabi:.4f} MHz")
+            parts.append(f"F$\\approx${fid_mpm:.4f}")
             labeled.add(rabi.iloc[0].name)
         heat = actual_modes[(actual_modes["Freq (MHz)"] < 0.01) & (np.abs(actual_modes["Phase (rad)"]) > np.pi / 2)]
         if len(heat) > 0:
             gamma_heat = heat.iloc[0]["Decay (us^-1)"]
             Theat_mpm = 1 / gamma_heat if gamma_heat > 1e-6 else np.inf
-            label += f"  $k_{{heat}}$={gamma_heat:.4f} ($T_{{heat}}\\approx${Theat_mpm:.1f} $\\mu s$)\n"
+            parts.append(f"$k_{{heat}}$={gamma_heat:.4f} ($T_{{heat}}\\approx${Theat_mpm:.1f} $\\mu s$)")
             labeled.add(heat.iloc[0].name)
+        n_other = 0
         if len(actual_modes) > 0:
             max_amp = actual_modes["Amplitude"].max()
-            for idx, row in actual_modes.iterrows():
-                if idx not in labeled and row["Amplitude"] > 0.05 * max_amp:
-                    label += f"  Other: f={row['Freq (MHz)']:.4f}, $k$={row['Decay (us^-1)']:.4f}\n"
+            n_other = sum(idx not in labeled and row["Amplitude"] > 0.05 * max_amp for idx, row in actual_modes.iterrows())
+        title = f"File {filenum} ({pair}), {len(df_params)} MPM terms" + (f", {n_other} more big term{'s' if n_other > 1 else ''} in table" if n_other else "")
+        title += "\n" + "   ".join(parts[:2]) + "\n" + "   ".join(parts[2:])
 
         c = colors[ii % len(colors)]
         ax = axs[ii]
         ax.plot(time, y, "o", color=c, markerfacecolor=to_rgba(c, 0.25), markeredgecolor=c, ms=8, label="data")
         time_fine = np.linspace(time[0], time[-1], 1000)
-        ax.plot(time_fine, eval_fit(time_fine), c="black", lw=2.5, label=label.strip())
-        ax.set(xlabel=r"t ($\mu s$)", ylabel=ylabel)
-        ax.set_title(f"File {filenum} ({pair})", fontsize="small")
-        ax.legend(fontsize="small", loc="upper right")
+        ax.plot(time_fine, eval_fit(time_fine), c="black", lw=2.5, label="MPM fit")
+        ax.set(xlabel=r"t ($\mu s$)", ylabel=ylabel, xlim=xlim)
+        ax.set_title(title, fontsize="small")
 
         ax = axs_res[ii]
         resid = y - eval_fit(time)
-        ax.plot(time, resid, ".", color=c, label=f"rms = {np.sqrt(np.mean(resid**2)):.4f}")
+        ax.plot(time, resid, ".", color=c)
         ax.axhline(0, color="0.5", lw=1)
-        ax.set(xlabel=r"t ($\mu s$)", ylabel=f"{ylabel} - MPM")
-        ax.set_title(f"File {filenum} ({pair})", fontsize="small")
-        ax.legend(fontsize="small", loc="upper right")
+        ax.set(xlabel=r"t ($\mu s$)", ylabel=f"{ylabel} - MPM", xlim=xlim)
+        ax.set_title(f"File {filenum} ({pair}), rms = {np.sqrt(np.mean(resid**2)):.4f}", fontsize="small")
 
     for idx in range(len(tasks), len(axs)):
         axs[idx].set_visible(False)
         axs_res[idx].set_visible(False)
     fig.suptitle(f"{alice_or_bob.capitalize()} BS Rabi, matrix pencil")
     fig.tight_layout()
+    # one legend for the whole figure, below the panels, so nothing covers the data
+    fig.legend(*axs[0].get_legend_handles_labels(), loc="upper center", bbox_to_anchor=(0.5, 0), ncol=2)
     fig_res.suptitle(f"{alice_or_bob.capitalize()} BS Rabi, matrix pencil residuals")
     fig_res.tight_layout()
     return pd.concat(all_dfs, ignore_index=True), fig, fig_res
 
 
 def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_or_b}{mode}_rabi",
-                    num_modes=None, n_env=None, floor=None, n_shots=None, lu_settings=None):
+                    num_modes=None, n_env=None, floor=None, n_shots=None, lu_settings=None, xlim=None):
     """
     Three fits on each beamsplitter Rabi trace, side by side:
       Floquet envelope fit (seeded by matrix pencil; black)   -> F_tbs, F_raw
@@ -4210,6 +4213,7 @@ def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_o
              reduced chi^2 is only good for comparing the three fits on the same trace.
     lu_settings: extra settings for the Lu fit, e.g. {"A": {"value": 1, "vary": False}}.
              Whatever is fixed in the Lu fit is also fixed in the Lu + sigma_g fit.
+    xlim: e.g. (0, 30) to zoom in on the first oscillations; None = whole trace
 
     Returns (df, fig, fig_res). df has one row per trace. The last columns (t, y, floquet, lu, gauss)
     hold the data and fit objects for follow-up plots; drop them before displaying:
@@ -4293,30 +4297,28 @@ def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_o
         ax.plot(tf, Pbar, "--", color="0.35", lw=1.5, label=r"$\bar{P}(t)$")
         ax.plot(tf, Pbar + C, ":", color="0.35", lw=1.2)
         ax.plot(tf, Pbar - C, ":", color="0.35", lw=1.2, label=r"$\bar{P} \pm \mathcal{C}$")
-        ax.set(xlabel=r"t ($\mu s$)", ylabel=ylabel)
-        ax.set_title(f"File {filenum} ({pair})", fontsize="small")
-        ax.legend(
-            fontsize="small", loc="upper right", title_fontsize="small",
-            title=(
-                f"$g_{{bs}}/\\pi$={r['gbs'] / np.pi:.4f} MHz   $t_{{bs}}$={r['tbs']:.3f} $\\mu s$\n"
-                f"$\\Gamma_{{\\alpha\\beta}}$={r['Gamma_ab']:.4f}   $\\lambda_1$={r['lam'][0]:+.4f}\n"
-                f"$\\sigma_g/g$={u_g['sigma_g'] / abs(u_g['gbs']):.2%}\n"
-                f"F = {r['F_tbs']:.4f} (Floquet), {F_lu:.4f} (Lu), {F_gauss:.4f} (Lu+$\\sigma_g$)"
-            ),
+        ax.set(xlabel=r"t ($\mu s$)", ylabel=ylabel, xlim=xlim)
+        # numbers go in the panel title so they never cover the data; line styles are in one figure legend
+        ax.set_title(
+            f"File {filenum} ({pair})   $g_{{bs}}/\\pi$={r['gbs'] / np.pi:.4f} MHz   $t_{{bs}}$={r['tbs']:.3f} $\\mu s$\n"
+            f"$\\Gamma_{{\\alpha\\beta}}$={r['Gamma_ab']:.4f}   $\\lambda_1$={r['lam'][0]:+.4f}   "
+            f"$\\sigma_g/g$={u_g['sigma_g'] / abs(u_g['gbs']):.1%}\n"
+            f"F = {r['F_tbs']:.4f} (Floquet), {F_lu:.4f} (Lu), {F_gauss:.4f} (Lu+$\\sigma_g$)",
+            fontsize="small",
         )
 
         # residual panel: structure here means a wrong model or a bad minimum.
         # A Gaussian envelope starts flat and an exponential starts with a slope, so look at early times.
         ax = axs_res[ii]
-        ax.plot(time, y - bs_floquet_model(time, r["result"].params, n_used), "k.", ms=3,
-                label=f"Floquet, redchi = {r['result'].redchi:.3g}")
-        ax.plot(time, y - lu.eval(t=time), "r.", ms=3, alpha=0.5, label=f"Lu, redchi = {lu.redchi:.3g}")
-        ax.plot(time, y - gauss.eval(t=time), "b.", ms=3, alpha=0.5,
-                label=rf"Lu + $\sigma_g$, redchi = {gauss.redchi:.3g}")
+        # Lu is drawn as open red circles under the small blue Lu + sigma_g dots: when sigma_g = 0 the two
+        # residuals are identical, and you see a blue dot inside a red ring
+        ax.plot(time, y - bs_floquet_model(time, r["result"].params, n_used), "k.", ms=3, label="Floquet")
+        ax.plot(time, y - lu.eval(t=time), "o", ms=5, mfc="none", mec="r", mew=0.8, label="Lu")
+        ax.plot(time, y - gauss.eval(t=time), ".", ms=3, color="b", label=r"Lu + $\sigma_g$")
         ax.axhline(0, color="0.5", lw=1)
-        ax.set(xlabel=r"t ($\mu s$)", ylabel=f"{ylabel} residual")
-        ax.set_title(f"File {filenum} ({pair})", fontsize="small")
-        ax.legend(fontsize="small", loc="upper right")
+        ax.set(xlabel=r"t ($\mu s$)", ylabel=f"{ylabel} residual", xlim=xlim)
+        ax.set_title(f"File {filenum} ({pair})   redchi: Floquet {r['result'].redchi:.3g}, "
+                     f"Lu {lu.redchi:.3g}, Lu+$\\sigma_g$ {gauss.redchi:.3g}", fontsize="small")
 
         rows.append(dict(
             FileNum=filenum,
@@ -4359,4 +4361,7 @@ def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_o
     fig.tight_layout()
     fig_res.suptitle(f"{alice_or_bob.capitalize()} BS Rabi residuals")
     fig_res.tight_layout()
+    # one legend per figure, below the panels, so nothing covers the data
+    fig.legend(*axs[0].get_legend_handles_labels(), loc="upper center", bbox_to_anchor=(0.5, 0), ncol=6)
+    fig_res.legend(*axs_res[0].get_legend_handles_labels(), loc="upper center", bbox_to_anchor=(0.5, 0), ncol=3)
     return pd.DataFrame(rows), fig, fig_res
