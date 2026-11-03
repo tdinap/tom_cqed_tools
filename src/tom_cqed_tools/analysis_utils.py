@@ -4106,15 +4106,24 @@ def bs_decay_func_gauss(t, A, k1, k2, gbs, B, phase, sigma_g):
 def fit_rabi_gauss(t, y, lu_params, yerr=None):
     """Fit bs_decay_func_gauss, starting from a finished Lu fit (fit_rabi_with_phase).
     lu_params: the Lu fit's .params. Their values, bounds and fixed/free flags are copied over,
-    so if A and B were fixed in the Lu fit they stay fixed here."""
+    so if A and B were fixed in the Lu fit they stay fixed here.
+    The fit is run from two starts, sigma_g = 0 (exactly the Lu solution) and sigma_g = 5% of g,
+    and the one with the lower chi^2 is kept. With sigma_g = 0 the model IS the Lu model, so the
+    result can never be worse than the Lu fit; if it is, the fit got stuck and this guards against it."""
     model = Model(bs_decay_func_gauss)
-    params = model.make_params()
-    for name in ["A", "k1", "k2", "gbs", "B", "phase"]:
-        p = lu_params[name]
-        params[name].set(value=p.value, min=p.min, max=p.max, vary=p.vary)
-    params["sigma_g"].set(value=0.05 * abs(lu_params["gbs"].value), min=0, max=abs(lu_params["gbs"].value))  # start small; cap at 100% of g
     weights = 1 / np.asarray(yerr) if yerr is not None else None
-    return model.fit(y, params, t=t, weights=weights)
+    best = None
+    for start in (0.0, 0.05):
+        params = model.make_params()
+        for name in ["A", "k1", "k2", "gbs", "B", "phase"]:
+            p = lu_params[name]
+            params[name].set(value=p.value, min=p.min, max=p.max, vary=p.vary)
+        g = abs(lu_params["gbs"].value)
+        params["sigma_g"].set(value=start * g, min=0, max=g)  # cap at 100% of g
+        res = model.fit(y, params, t=t, weights=weights)
+        if best is None or res.chisqr < best.chisqr:
+            best = res
+    return best
 
 
 def _bs_fidelity_gauss(k1, k2, sigma_g, gbs):
@@ -4381,7 +4390,7 @@ def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_o
         ax.set_title(
             f"File {filenum} ({pair})   $g_{{bs}}/\\pi$={r['gbs'] / np.pi:.4f} MHz   $t_{{bs}}$={r['tbs']:.3f} $\\mu s$\n"
             f"$\\Gamma_{{\\alpha\\beta}}$={r['Gamma_ab']:.4f}   $\\lambda_1$={r['lam'][0]:+.4f}   "
-            f"$\\sigma_g/g$={u_g['sigma_g'] / abs(u_g['gbs']):.1%}\n"
+            f"$\\sigma_g/g$={100 * u_g['sigma_g'] / abs(u_g['gbs']):.1f}$\\%$\n"
             f"F = {r['F_tbs']:.4f} (Floquet), {F_lu:.4f} (Lu), {F_gauss:.4f} (Lu+$\\sigma_g$)",
             fontsize="small",
         )
