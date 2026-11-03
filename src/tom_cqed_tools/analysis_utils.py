@@ -4030,20 +4030,8 @@ def fit_bs_floquet(t, P, lam0, A0, gbs=None, fix_gbs=False, floor=None, n_shots=
         for m in range(2, n_modes + 1)
     ]
 
-    # quantities the fidelity needs: best-fit values only (error bars come from repeat traces, not the fit)
-    u = v.valuesdict()
-    tbs = np.pi / (2 * u["gbs"])
-    Pbar_tbs = u["Pss"] + sum(u[f"A{m}"] * np.exp(u[f"lam{m}"] * tbs) for m in range(1, n_modes + 1))
-    contrast_tbs = np.exp(-u["Gamma_ab"] * tbs)
-
-    # Andre's fidelity F = 1/2 (2 sum_m A_m e^{lam_m t} + e^{-Gamma_ab t}) at t = tbs. The sum includes Pss.
-    # It assumes ideal readout (Pbar(0) = 1/2). With readout P_meas = a + b P, the population term
-    # 2 Pbar(t) becomes (Pbar(t) - a) / (Pbar(0) - a) = 1 + (Pbar(t) - Pbar(0)) / (2 Cx),
-    # using Pbar(0) - a = 2 Cx. This equals 1 at t = 0 for any readout, and reduces to 2 Pbar(t) when a = 0, b = 1.
-    Pbar0 = u["Pss"] + sum(u[f"A{m}"] for m in range(1, n_modes + 1))
-    N_tbs = 1 + (Pbar_tbs - Pbar0) / (2 * u["Cx"])
-    F_tbs = 0.5 * (N_tbs + contrast_tbs)
-    F_raw = 0.5 * (2 * Pbar_tbs + contrast_tbs)  # Andre's formula on raw P_e, no readout correction
+    # CHANGED: the fidelity formula moved into _bs_fidelity_floquet (same math), so the error propagation uses it too
+    Pbar_tbs, contrast_tbs, F_tbs, F_raw = _bs_fidelity_floquet(v.valuesdict(), n_modes)
 
     return dict(
         Pss=v["Pss"].value,
@@ -4062,6 +4050,48 @@ def fit_bs_floquet(t, P, lam0, A0, gbs=None, fix_gbs=False, floor=None, n_shots=
         F_raw=F_raw,
         result=res,
     )
+
+
+def _bs_fidelity_floquet(u, n_modes):
+    """Andre's fidelity from the Floquet envelope fit. u = fit parameter values (params.valuesdict()).
+    Returns (Pbar_tbs, contrast_tbs, F_tbs, F_raw)."""
+    tbs = np.pi / (2 * u["gbs"])
+    Pbar_tbs = u["Pss"] + sum(u[f"A{m}"] * np.exp(u[f"lam{m}"] * tbs) for m in range(1, n_modes + 1))
+    contrast_tbs = np.exp(-u["Gamma_ab"] * tbs)
+
+    # Andre's fidelity F = 1/2 (2 sum_m A_m e^{lam_m t} + e^{-Gamma_ab t}) at t = tbs. The sum includes Pss.
+    # It assumes ideal readout (Pbar(0) = 1/2). With readout P_meas = a + b P, the population term
+    # 2 Pbar(t) becomes (Pbar(t) - a) / (Pbar(0) - a) = 1 + (Pbar(t) - Pbar(0)) / (2 Cx),
+    # using Pbar(0) - a = 2 Cx. This equals 1 at t = 0 for any readout, and reduces to 2 Pbar(t) when a = 0, b = 1.
+    Pbar0 = u["Pss"] + sum(u[f"A{m}"] for m in range(1, n_modes + 1))
+    N_tbs = 1 + (Pbar_tbs - Pbar0) / (2 * u["Cx"])
+    F_tbs = 0.5 * (N_tbs + contrast_tbs)
+    F_raw = 0.5 * (2 * Pbar_tbs + contrast_tbs)  # Andre's formula on raw P_e, no readout correction
+    return Pbar_tbs, contrast_tbs, F_tbs, F_raw
+
+
+def fidelity_err_stat(F_of_values, params, covar, var_names):
+    """1-sigma statistical error on a fidelity, from a fit's covariance matrix.
+    F_of_values: function that takes params.valuesdict() and returns F.
+    Takes the numerical derivative of F with respect to each free fit parameter, then
+    sigma_F^2 = grad . covar . grad. Constrained parameters (lmfit expr) follow automatically.
+    This only covers noise in the data. It does NOT cover a wrong model; the fit-window spread does that."""
+    if covar is None:
+        return np.nan
+    p = copy.deepcopy(params)
+    F0 = F_of_values(p.valuesdict())
+    grad = []
+    for name in var_names:
+        v0 = p[name].value
+        h = 1e-6 * max(abs(v0), 1e-6)
+        p[name].value = v0 + h
+        if p[name].value == v0:  # sitting on its upper bound: step down instead
+            h = -h
+            p[name].value = v0 + h
+        grad.append((F_of_values(p.valuesdict()) - F0) / h)
+        p[name].value = v0
+    grad = np.array(grad)
+    return float(np.sqrt(grad @ covar @ grad))
 
 
 def bs_decay_func_gauss(t, A, k1, k2, gbs, B, phase, sigma_g):
@@ -4198,7 +4228,8 @@ def analyze_bs_mpm(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_or
 
 
 def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_or_b}{mode}_rabi",
-                    num_modes=None, n_env=None, floor=None, n_shots=None, lu_settings=None, xlim=None):
+                    num_modes=None, n_env=None, floor=None, n_shots=None, lu_settings=None, xlim=None,
+                    windows=(25, 50, 100, 200)):
     """
     Three fits on each beamsplitter Rabi trace, side by side:
       Floquet envelope fit (seeded by matrix pencil; black)   -> F_tbs, F_raw
@@ -4214,10 +4245,18 @@ def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_o
     lu_settings: extra settings for the Lu fit, e.g. {"A": {"value": 1, "vary": False}}.
              Whatever is fixed in the Lu fit is also fixed in the Lu + sigma_g fit.
     xlim: e.g. (0, 30) to zoom in on the first oscillations; None = whole trace
+    windows: fit windows in us for the error bars. Every fit is redone on t <= each window, and
+             the Floquet fit is also redone with the other number of exps. None = skip (faster).
 
-    Returns (df, fig, fig_res). df has one row per trace. The last columns (t, y, floquet, lu, gauss)
-    hold the data and fit objects for follow-up plots; drop them before displaying:
-        display(df.drop(columns=["t", "y", "floquet", "lu", "gauss"]))
+    Error bars, for each of F_tbs, F_lu, F_gauss:
+      <F>_err_stat:   from the fit covariance (noise only; assumes the model is right)
+      <F>_err_window: half the range of F over the fit windows (and over n_env, for Floquet).
+                      If the model is wrong or the rates change during the trace, this is big.
+      F_by_window: the individual F values behind <F>_err_window, so you can check them.
+
+    Returns (df, fig, fig_res). df has one row per trace. The last columns (t, y, floquet, lu, gauss,
+    F_by_window) hold the data and fit objects for follow-up plots; drop them before displaying:
+        display(df.drop(columns=["t", "y", "floquet", "lu", "gauss", "F_by_window"]))
     """
     lu_settings = lu_settings or {}
     tasks = list(zip(filenums, modes))
@@ -4277,12 +4316,52 @@ def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_o
         lu = fit_rabi_with_phase(time, y, pi_guess=2.0,
                                  custom_settings={"gbs": {"value": gbs_guess or r["gbs"]}, **lu_settings}, yerr=sigma)
         u_lu = lu.params.valuesdict()
-        F_lu = float(_bs_fidelity((u_lu["k1"], u_lu["k2"], abs(u_lu["gbs"]))))
+        # CHANGED: Lu F computed with _bs_fidelity_gauss at sigma_g = 0. Same formula as _bs_fidelity, but in
+        # float64 numpy; _bs_fidelity is jax float32, which is too coarse for the numerical derivative below.
+        F_lu = _bs_fidelity_gauss(u_lu["k1"], u_lu["k2"], 0.0, abs(u_lu["gbs"]))
 
         # Lu + sigma_g, started from the Lu fit
         gauss = fit_rabi_gauss(time, y, lu.params, yerr=sigma)
         u_g = gauss.params.valuesdict()
         F_gauss = _bs_fidelity_gauss(u_g["k1"], u_g["k2"], u_g["sigma_g"], abs(u_g["gbs"]))
+
+        # statistical error bars: fit covariance pushed through each F formula
+        F_tbs_err_stat = fidelity_err_stat(lambda u: _bs_fidelity_floquet(u, n_used)[2], r["result"].params,
+                                           r["result"].covar, r["result"].var_names)
+        F_lu_err_stat = fidelity_err_stat(lambda u: _bs_fidelity_gauss(u["k1"], u["k2"], 0.0, abs(u["gbs"])),
+                                          lu.params, lu.covar, lu.var_names)
+        F_gauss_err_stat = fidelity_err_stat(lambda u: _bs_fidelity_gauss(u["k1"], u["k2"], u["sigma_g"], abs(u["gbs"])),
+                                             gauss.params, gauss.covar, gauss.var_names)
+
+        # window error bars: redo all three fits on t <= each window, same seeds and settings
+        F_by_window = {"full": (r["F_tbs"], F_lu, F_gauss)}
+        s_used = sorted(seeds[:n_used])
+        for Tw in (windows or []):
+            m = time <= Tw
+            if m.sum() < 20 or Tw >= time.max():
+                continue
+            tw, yw = time[m], y[m]
+            sw = sigma[m] if sigma is not None else None
+            rw = fit_bs_floquet(tw, yw, lam0=[-g for g, _ in s_used], A0=[A for _, A in s_used],
+                                gbs=gbs_guess, floor=floor, n_shots=n_shots)
+            luw = fit_rabi_with_phase(tw, yw, pi_guess=2.0,
+                                      custom_settings={"gbs": {"value": gbs_guess or r["gbs"]}, **lu_settings}, yerr=sw)
+            gw = fit_rabi_gauss(tw, yw, luw.params, yerr=sw)
+            uw, ugw = luw.params.valuesdict(), gw.params.valuesdict()
+            F_by_window[f"t<={Tw}"] = (
+                rw["F_tbs"],
+                _bs_fidelity_gauss(uw["k1"], uw["k2"], 0.0, abs(uw["gbs"])),
+                _bs_fidelity_gauss(ugw["k1"], ugw["k2"], ugw["sigma_g"], abs(ugw["gbs"])),
+            )
+        # Floquet only: the other number of exps on the full trace (if there are seeds for it)
+        n_alt = 2 if n_used == 1 else 1
+        if windows and len(seeds) >= n_alt:
+            s_alt = sorted(seeds[:n_alt])
+            r_alt = fit_bs_floquet(time, y, lam0=[-g for g, _ in s_alt], A0=[A for _, A in s_alt],
+                                   gbs=gbs_guess, floor=floor, n_shots=n_shots)
+            F_by_window[f"full, n_env={n_alt}"] = (r_alt["F_tbs"], np.nan, np.nan)
+        F_win = np.array(list(F_by_window.values()), float)
+        F_tbs_err_window, F_lu_err_window, F_gauss_err_window = (np.nanmax(F_win, 0) - np.nanmin(F_win, 0)) / 2
 
         # fit panel
         tf = np.linspace(time.min(), time.max(), 1000)
@@ -4337,9 +4416,15 @@ def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_o
             Pbar_tbs=r["Pbar_tbs"],
             contrast_tbs=r["contrast_tbs"],
             F_tbs=r["F_tbs"],
+            F_tbs_err_stat=F_tbs_err_stat,
+            F_tbs_err_window=F_tbs_err_window,
             F_raw=r["F_raw"],
             F_lu=F_lu,
+            F_lu_err_stat=F_lu_err_stat,
+            F_lu_err_window=F_lu_err_window,
             F_gauss=F_gauss,
+            F_gauss_err_stat=F_gauss_err_stat,
+            F_gauss_err_window=F_gauss_err_window,
             k1_lu=u_lu["k1"],
             k2_lu=u_lu["k2"],
             k1_gauss=u_g["k1"],
@@ -4351,7 +4436,7 @@ def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_o
             redchi_lu=lu.redchi,
             redchi_gauss=gauss.redchi,
             bic=r["result"].bic,
-            t=time, y=y, floquet=r, lu=lu, gauss=gauss,
+            t=time, y=y, floquet=r, lu=lu, gauss=gauss, F_by_window=F_by_window,
         ))
 
     for idx in range(len(tasks), len(axs)):
@@ -4365,3 +4450,23 @@ def analyze_bs_fits(*, filenums, modes, data_path, alice_or_bob, suffix="bs_{a_o
     fig.legend(*axs[0].get_legend_handles_labels(), loc="upper center", bbox_to_anchor=(0.5, 0), ncol=6)
     fig_res.legend(*axs_res[0].get_legend_handles_labels(), loc="upper center", bbox_to_anchor=(0.5, 0), ncol=3)
     return pd.DataFrame(rows), fig, fig_res
+
+
+def plot_bs_fidelities(df):
+    """F at t_bs from the three fits of analyze_bs_fits, one column of points per BS pair.
+    df: one analyze_bs_fits table, or several joined with pd.concat([df_a, df_b], ignore_index=True).
+    Error bar = sqrt(err_stat^2 + err_window^2). Both parts are columns in df.
+    Returns fig."""
+    x = np.arange(len(df))
+    fig, ax = plt.subplots()
+    for dx, col, fmt, mfc, label in [
+        (-0.15, "F_tbs", "ko", None, "Floquet (Andre's F, readout-corrected)"),
+        (0.0, "F_lu", "rs", "none", "Lu"),
+        (0.15, "F_gauss", "b^", None, r"Lu + $\sigma_g$"),
+    ]:
+        err = np.hypot(df[f"{col}_err_stat"].astype(float), df[f"{col}_err_window"].astype(float))
+        ax.errorbar(x + dx, df[col], yerr=err, fmt=fmt, mfc=mfc, capsize=3, label=label)
+    ax.set_xticks(x, df["pair"])
+    ax.set(xlabel="BS pair", ylabel=r"F at $t_{bs}$")
+    ax.legend()
+    return fig
