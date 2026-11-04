@@ -5,11 +5,19 @@ import numpy as np
 from pathlib import Path
 from typing import Union, List, Optional
 
+# Print settings used when fixed_scale=True (thesis: \textwidth = 6 in, captions 10 pt)
+TEXT_WIDTH_IN = 6.0   # thesis text width, only used to report the printed width
+UNIT_IN = 0.35        # printed inches per diagram unit (one advance() = 1.2 units)
+FONT_PT = 8           # printed label size (8 pt keeps the longest sequences within 6 in)
+LINE_SCALE = 0.5      # line widths x0.5: same printed weight the old figures had after LaTeX shrank them
+LABEL_PAD = 0.12      # minimum space between a label and its box edge, in diagram units
+
 class CircuitDiagramBuilder:
     """
     A programmatic builder for Circuit QED sequence diagrams.
     """
-    def __init__(self, modes: List[str], height: float = 3.5, theme: str = 'transparent'):
+    def __init__(self, modes: List[str], height: float = 3.5, theme: str = 'transparent',
+                 fixed_scale: bool = False):
         """
         Initializes the CircuitDiagramBuilder.
         
@@ -17,6 +25,10 @@ class CircuitDiagramBuilder:
             modes (List[str]): List of mode names (e.g., ['Transmon', 'Buffer']).
             height (float): Total height of the figure.
             theme (str): Theme for alpha transparency. Options are 'solid' or 'transparent'.
+            fixed_scale (bool): Draw at the printed thesis scale: every diagram has the
+                same box size per unit, FONT_PT text and thin lines, and boxes widen to
+                fit their labels. Include the saved file without a width= option so
+                LaTeX does not rescale it. If False, the original behavior is kept.
         """
         self.modes = {name: i for i, name in enumerate(reversed(modes))}
         
@@ -40,6 +52,10 @@ class CircuitDiagramBuilder:
         self.alpha_theme = themes.get(theme, themes['solid'])
         
         self.t = 0.5
+        self.fixed_scale = fixed_scale
+        self._carry = 0.0  # extra space owed after a box that widened to fit its label
+        self._fs = FONT_PT if fixed_scale else 14
+        self._lw = LINE_SCALE if fixed_scale else 1.0
         self.fig, self.ax = plt.subplots(figsize=(12, height))
         self.ax.axis('off')
 
@@ -50,7 +66,8 @@ class CircuitDiagramBuilder:
         Args:
             dt (float): The amount of time to advance the cursor.
         """
-        self.t += dt
+        self.t += dt + self._carry
+        self._carry = 0.0
 
     def _draw_box(self, y: float, width: float, height: float, text: str, color: str, 
                   is_meas: bool = False, alpha: Optional[float] = None):
@@ -66,20 +83,44 @@ class CircuitDiagramBuilder:
         white = np.array([1.0, 1.0, 1.0])
         blended_rgb = alpha * rgb + (1.0 - alpha) * white
         
+        label = None
+        if not is_meas:
+            label = self.ax.text(self.t, y, text, ha='center', va='center', fontsize=self._fs, zorder=3)
+            if self.fixed_scale:
+                needed = self._text_width_units(label) + 2 * LABEL_PAD
+                if needed > width:
+                    extra = needed - width
+                    self.t += extra / 2        # shift right so the gap to the previous box is kept
+                    self._carry = extra / 2    # and push the next box right by the same amount
+                    width = needed
+                    label.set_x(self.t)
+
         box = FancyBboxPatch((self.t - width/2, y - height/2), width, height,
                              boxstyle="round,pad=0.05,rounding_size=0.15",
-                             ec="black", fc=blended_rgb, lw=1.5, zorder=2)
+                             ec="black", fc=blended_rgb, lw=1.5 * self._lw, zorder=2)
         self.ax.add_patch(box)
         
         if is_meas:
             eff_h = min(height, 1.0)
             theta = np.linspace(np.pi/6, 5*np.pi/6, 50)
             r = eff_h * 0.35
-            self.ax.plot(self.t + r*np.cos(theta), y - eff_h*0.1 + r*np.sin(theta), 'k-', lw=1.5, zorder=3)
-            self.ax.arrow(self.t, y - eff_h*0.15, r*0.5*np.cos(np.pi/3), r*0.7*np.sin(np.pi/3),
-                          head_width=0.08, head_length=0.1, fc='k', ec='k', zorder=3)
-        else:
-            self.ax.text(self.t, y, text, ha='center', va='center', fontsize=14, zorder=3)
+            self.ax.plot(self.t + r*np.cos(theta), y - eff_h*0.1 + r*np.sin(theta), 'k-', lw=1.5 * self._lw, zorder=3)
+            if self.fixed_scale:
+                self.ax.arrow(self.t, y - eff_h*0.15, r*0.5*np.cos(np.pi/3), r*0.7*np.sin(np.pi/3),
+                              head_width=0.08, head_length=0.1, fc='k', ec='k', lw=self._lw, zorder=3)
+            else:
+                self.ax.arrow(self.t, y - eff_h*0.15, r*0.5*np.cos(np.pi/3), r*0.7*np.sin(np.pi/3),
+                              head_width=0.08, head_length=0.1, fc='k', ec='k', zorder=3)
+
+    def _text_width_units(self, label) -> float:
+        """Printed width of a label, in diagram units (fixed_scale only)."""
+        try:
+            renderer = self.fig.canvas.get_renderer()
+        except AttributeError:  # non-Agg canvas: measure with a standalone Agg renderer
+            from matplotlib.backends.backend_agg import RendererAgg
+            renderer = RendererAgg(10, 10, self.fig.dpi)
+        width_in = label.get_window_extent(renderer).width / self.fig.dpi
+        return width_in / UNIT_IN
 
     # --- API Commands ---
     # Note: Default width is now 0.8 (wider than the 0.7 height) to prevent vertical-rectangle single gates.
@@ -157,17 +198,32 @@ class CircuitDiagramBuilder:
         Args:
             save_as (Union[str, Path], optional): If provided, saves the figure to this path.
         """
-        end_t = self.t + 1.0
+        end_t = self.t + self._carry + 1.0
         for mode_name, y in self.modes.items():
-            self.ax.plot([-0.5, end_t], [y, y], color='black', lw=2, zorder=1)
-            self.ax.text(-0.8, y, mode_name, va='center', ha='right', fontsize=14, color='black')
+            self.ax.plot([-0.5, end_t], [y, y], color='black', lw=2 * self._lw, zorder=1)
+            self.ax.text(-0.8, y, mode_name, va='center', ha='right', fontsize=self._fs, color='black')
         
         self.ax.set_xlim(-2.0, end_t + 0.5)
         
         self.ax.set_aspect('equal')
 
-        plt.tight_layout()
-        if save_as:
-            plt.savefig(save_as, bbox_inches='tight', transparent=True)
-            print(f"Saved to {save_as}")
+        if not self.fixed_scale:
+            plt.tight_layout()
+            if save_as:
+                plt.savefig(save_as, bbox_inches='tight', transparent=True)
+                print(f"Saved to {save_as}")
+        else:
+            # one diagram unit = UNIT_IN printed inches; square canvas so width is the limit
+            x0, x1 = self.ax.get_xlim()
+            self.ax.set_position([0, 0, 1, 1])
+            self.fig.set_size_inches((x1 - x0) * UNIT_IN, (x1 - x0) * UNIT_IN)
+            self.fig.canvas.draw()
+            w = self.fig.get_tightbbox(self.fig.canvas.get_renderer()).width
+            if save_as:
+                plt.savefig(save_as, bbox_inches='tight', pad_inches=0.02, transparent=True)
+                print(f"Saved to {save_as}: printed width {w:.2f} in "
+                      f"({100 * w / TEXT_WIDTH_IN:.0f}% of text width). Include without width=.")
+            if w > TEXT_WIDTH_IN:
+                print(f"Warning: {w:.2f} in is wider than the {TEXT_WIDTH_IN} in text width; "
+                      f"LaTeX will shrink it. Shorten the sequence or lower UNIT_IN.")
         plt.show()
