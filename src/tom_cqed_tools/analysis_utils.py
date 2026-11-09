@@ -19,16 +19,14 @@ import pandas as pd
 
 # Add missing imports for constants
 import scipy.constants as const
-import slab.dsfit as dsf
 from jax import jacfwd, jacrev
 from lmfit import Model
 from lmfit.models import LinearModel, LorentzianModel
 from matplotlib.colors import to_rgba
+from matplotlib.patches import Patch
 from scipy import optimize
 from scipy.constants import e, h, k
 
-# from slab import *
-from slab import fitlor
 from tabulate import tabulate
 
 import ipynbname
@@ -89,10 +87,10 @@ def signal_plot(freq, log_mag, phase, lin_mag, real, imag):
 
 def get_lin_correction(x, y, ends_only=True, add_start_offset=True):
     if ends_only:
-        p = dsf.fitlinear(np.array([x[0], x[-1]]), np.array([y[0], y[-1]]))
+        p = np.polyfit([x[0], x[-1]], [y[0], y[-1]], 1)[::-1]  # [offset, slope]
         m = p[1]
     else:
-        p = dsf.fitlinear(x, y)
+        p = np.polyfit(x, y, 1)[::-1]  # [offset, slope]
         m = p[1]
     if add_start_offset:
         b = y[0] - m * x[0]
@@ -116,7 +114,7 @@ def get_mag_phase_lin_correction(
 
         ax1 = ax[0][0]
         ax1.plot(freq, log_mag, label="Mag.")
-        ax1.plot(freq, dsf.linear(p_mag, freq), label="Fit", linestyle="--", c="r")
+        ax1.plot(freq, p_mag[0] + p_mag[1] * freq, label="Fit", linestyle="--", c="r")
 
         ax1.set_xlabel("Freq. (GHz)")
         ax1.set_ylabel("Mag. (dB)")
@@ -131,7 +129,7 @@ def get_mag_phase_lin_correction(
 
         ax3 = ax[1][0]
         ax3.plot(freq, phase, label="Phase")
-        ax3.plot(freq, dsf.linear(p_phase, freq), label="Fit", linestyle="--", c="r")
+        ax3.plot(freq, p_phase[0] + p_phase[1] * freq, label="Fit", linestyle="--", c="r")
 
         ax3.set_xlabel("Freq. (GHz)")
         ax3.set_ylabel("Phase (Degree)")
@@ -154,9 +152,10 @@ def get_coupling_mag_fit(freq, real, imag, display=True):
 
     if display:
         fig, ax = plt.subplots(1, 1, figsize=(3, 3), layout="constrained")
-    fit = fitlor(freq, mag_0**2 / max(mag_0) ** 2, showfit=display)
-    Qs = fit[2] / fit[3] / 2
-    fs = fit[2]
+    # single Lorentzian: fit = [amp, center, hwhm, offset]
+    fit = fitlorsum(freq, mag_0**2 / max(mag_0) ** 2, N=1, showfit=display)
+    Qs = fit[1] / fit[2] / 2
+    fs = fit[1]
     Qi = (kappa + 1.0) * Qs
     Qc = Qi / kappa
 
@@ -937,16 +936,19 @@ def fitlorsum(
     if debug:
         print(fitparams)
 
-    p1 = dsf.fitgeneral(
-        fitdatax,
-        fitdatay,
-        lambda p, x: lorfuncsum(p, x, N=N),
-        fitparams,
-        domain=None,
-        showfit=showfit,
-        showstartfit=showstartfit,
-        label=label,
-    )
+    # least-squares fit (same as slab's dsfit.fitgeneral, which this replaced)
+    order = np.argsort(fitdatax)
+    fitdatax = np.asarray(fitdatax)[order]
+    fitdatay = np.asarray(fitdatay)[order]
+    errfunc = lambda p, x, y: lorfuncsum(p, x, N=N) - y
+    p1, _ = optimize.leastsq(errfunc, fitparams, args=(fitdatax, fitdatay))
+    if showfit:
+        plt.plot(fitdatax, fitdatay, "bo", label=label + " data")
+        if showstartfit:
+            plt.plot(fitdatax, lorfuncsum(fitparams, fitdatax, N=N), label=label + " startfit")
+        plt.plot(fitdatax, lorfuncsum(p1, fitdatax, N=N), "r-", label=label + " fit")
+        if label != "":
+            plt.legend()
     # Correctly abs the first peak's HWHM (index 2)
     p1[2] = abs(p1[2])
     return p1
@@ -1117,7 +1119,7 @@ def iq_rotate(avgi, avgq):
 def rotatedIQ(freqs,I,Q):
     phase = np.arctan2(Q,I)
     unwrapped_phase = np.unwrap(phase)
-    p = dsf.fitlinear(freqs, unwrapped_phase,showfit = False)
+    p = np.polyfit(freqs, unwrapped_phase, 1)[::-1]  # [offset, slope]
     phi = p[0] + p[1]*freqs
 
     I_rot = I*np.cos(phi) + Q*np.sin(phi)
@@ -4479,3 +4481,77 @@ def plot_bs_fidelities(df):
     ax.set(xlabel="BS pair", ylabel=r"F at $t_{bs}$")
     ax.legend()
     return fig
+
+
+def analyze_bs_error_budget(*, modes, pairs, driven=None, t2_type="ramsey", title=""):
+    """
+    Beamsplitter error budget for several pairs: static vs drive-induced vs swap-specific.
+
+    modes  : undriven coherences of every mode, us. Measure once, reused by every pair.
+             {"Bob": {"T1": 400, "T2": 460}, "S3": {"T1": 500, "T2": 1000}, ...}
+    pairs  : one entry per beamsplitter. t_bs in us, fitted Lu/Yao rates in 1/us.
+             {"Bob-S3": {"modes": ("Bob", "S3"), "t_bs": 2.0, "kappa_1": ..., "kappa_phi": ...}, ...}
+    driven : optional. Coherences of the pair's two modes with THAT pair's pump on but
+             detuned (no swap), us. Keyed by pair name; pairs left out get no middle bar.
+             {"Bob-S3": {"Bob": {"T1": ..., "T2": ...}, "S3": {"T1": ..., "T2": ...}}, ...}
+    t2_type: "ramsey" or "echo". Ramsey includes slow noise the swap suppresses,
+             so a Ramsey-based static bar is an upper bound on static error.
+
+    Predicted BS rates from mode coherences are averages over the pair's two modes:
+      kappa_1   = mean(1/T1)
+      kappa_phi = mean(1/T2 - 1/(2 T1))      (pure dephasing)
+    Infidelity, Lu form: 1 - F = 1 - 0.5*[exp(-k1 t) + exp(-(k1+kphi) t)],
+    split into loss ~ k1*t and dephasing ~ kphi*t/2 (first order).
+
+    Returns (df, fig, ax). One df row per (pair, tier); infidelities are fractions, plot is in %.
+    """
+    tier_names = ["static", "pump on, detuned", "beamsplitter fit"]
+
+    rows = []
+    for pair, p in pairs.items():
+        t = p["t_bs"]
+        sources = [{m: modes[m] for m in p["modes"]},
+                   driven.get(pair) if driven is not None else None,
+                   None]
+        for tier, src in zip(tier_names, sources):
+            if tier == "beamsplitter fit":
+                k1, kphi = p["kappa_1"], p["kappa_phi"]
+            elif src is None:
+                continue  # no detuned-pump data for this pair
+            else:
+                k1 = np.mean([1 / m["T1"] for m in src.values()])
+                kphi = np.mean([1 / m["T2"] - 1 / (2 * m["T1"]) for m in src.values()])
+            F = 0.5 * (np.exp(-k1 * t) + np.exp(-(k1 + kphi) * t))
+            rows.append({"pair": pair, "tier": tier, "t_bs (us)": t,
+                         "kappa_1 (1/us)": k1, "kappa_phi (1/us)": kphi,
+                         "loss err": k1 * t, "dephasing err": kphi * t / 2, "1-F": 1 - F})
+    df = pd.DataFrame(rows)
+
+    # excess over the static prediction, per pair
+    static_err = df[df["tier"] == "static"].set_index("pair")["1-F"]
+    df["excess over static"] = df["1-F"] - df["pair"].map(static_err)
+
+    # grouped bars: one group per pair, one bar per measured tier (color), bars in a
+    # group touch; dark part = loss, light part on top = dephasing
+    fig, ax = plt.subplots()
+    pair_names = list(pairs)
+    x = np.arange(len(pair_names))
+    width = 0.3
+    for j, pair in enumerate(pair_names):
+        d = df[df["pair"] == pair].reset_index(drop=True)
+        for i, r in d.iterrows():
+            xi = x[j] + (i - (len(d) - 1) / 2) * width
+            color = f"C{tier_names.index(r['tier'])}"
+            ax.bar(xi, r["loss err"] * 100, width, color=color)
+            ax.bar(xi, r["dephasing err"] * 100, width, bottom=r["loss err"] * 100,
+                   color=color, alpha=0.4)
+    ax.set_xticks(x)
+    ax.set_xticklabels(pair_names)
+    ax.set_ylabel("Swap infidelity (%)")
+    ax.set_title(title)
+    static_label = "static (Ramsey: upper bound)" if t2_type == "ramsey" else "static (echo)"
+    handles = [Patch(color=f"C{i}") for i in range(3)] + [Patch(color="grey", alpha=0.4)]
+    labels = [static_label, "pump on, detuned", "beamsplitter fit", "lighter top = dephasing part"]
+    ax.legend(handles, labels)
+
+    return df, fig, ax
