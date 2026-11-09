@@ -24,6 +24,9 @@ from lmfit import Model
 from lmfit.models import LinearModel, LorentzianModel
 from matplotlib.colors import to_rgba
 from matplotlib.patches import Patch
+from matplotlib.legend_handler import HandlerTuple
+from matplotlib.colors import to_rgb
+
 from scipy import optimize
 from scipy.constants import e, h, k
 
@@ -4483,19 +4486,23 @@ def plot_bs_fidelities(df):
     return fig
 
 
-def analyze_bs_error_budget(*, modes, pairs, driven=None, t2_type="ramsey", title=""):
+def analyze_bs_error_budget(*, modes, pairs, driven=None, t2_type="ramsey", title="",
+                            tier_labels=("Static (mode coherences)", "Pump on, detuned", "Beamsplitter"),
+                            loss_label="Dark: photon loss", dephasing_label="Light: dephasing"):
     """
     Beamsplitter error budget for several pairs: static vs drive-induced vs swap-specific.
 
     modes  : undriven coherences of every mode, us. Measure once, reused by every pair.
-             {"Bob": {"T1": 400, "T2": 460}, "S3": {"T1": 500, "T2": 1000}, ...}
+             Give either T2 or Tphi (pure dephasing time) per mode.
+             {"Bob": {"T1": 400, "T2": 460}, "S3": {"T1": 500, "Tphi": 1000}, ...}
     pairs  : one entry per beamsplitter. t_bs in us, fitted Lu/Yao rates in 1/us.
              {"Bob-S3": {"modes": ("Bob", "S3"), "t_bs": 2.0, "kappa_1": ..., "kappa_phi": ...}, ...}
     driven : optional. Coherences of the pair's two modes with THAT pair's pump on but
              detuned (no swap), us. Keyed by pair name; pairs left out get no middle bar.
              {"Bob-S3": {"Bob": {"T1": ..., "T2": ...}, "S3": {"T1": ..., "T2": ...}}, ...}
     t2_type: "ramsey" or "echo". Ramsey includes slow noise the swap suppresses,
-             so a Ramsey-based static bar is an upper bound on static error.
+             so a Ramsey-based static bar is an upper bound on static error (printed as a reminder).
+    tier_labels, loss_label, dephasing_label: legend text, change freely for papers/talks.
 
     Predicted BS rates from mode coherences are averages over the pair's two modes:
       kappa_1   = mean(1/T1)
@@ -4515,12 +4522,16 @@ def analyze_bs_error_budget(*, modes, pairs, driven=None, t2_type="ramsey", titl
                    None]
         for tier, src in zip(tier_names, sources):
             if tier == "beamsplitter fit":
+                if p.get("kappa_1") is None or p.get("kappa_phi") is None:
+                    continue  # no fit yet: show the static prediction only
                 k1, kphi = p["kappa_1"], p["kappa_phi"]
             elif src is None:
                 continue  # no detuned-pump data for this pair
             else:
                 k1 = np.mean([1 / m["T1"] for m in src.values()])
-                kphi = np.mean([1 / m["T2"] - 1 / (2 * m["T1"]) for m in src.values()])
+                # pure dephasing: given directly as Tphi, or from T2 via 1/T2 - 1/(2 T1)
+                kphi = np.mean([1 / m["Tphi"] if "Tphi" in m else 1 / m["T2"] - 1 / (2 * m["T1"])
+                                for m in src.values()])
             F = 0.5 * (np.exp(-k1 * t) + np.exp(-(k1 + kphi) * t))
             rows.append({"pair": pair, "tier": tier, "t_bs (us)": t,
                          "kappa_1 (1/us)": k1, "kappa_phi (1/us)": kphi,
@@ -4532,7 +4543,10 @@ def analyze_bs_error_budget(*, modes, pairs, driven=None, t2_type="ramsey", titl
     df["excess over static"] = df["1-F"] - df["pair"].map(static_err)
 
     # grouped bars: one group per pair, one bar per measured tier (color), bars in a
-    # group touch; dark part = loss, light part on top = dephasing
+    # group touch; dark part = loss, light part on top = dephasing.
+    # Okabe-Ito colors (colorblind-safe); light = same color blended toward white (opaque)
+    colors = ["#0072B2", "#E69F00", "#009E73"]
+    light = lambda c: tuple(1 - (1 - np.array(to_rgb(c))) * 0.45)
     fig, ax = plt.subplots()
     pair_names = list(pairs)
     x = np.arange(len(pair_names))
@@ -4541,17 +4555,27 @@ def analyze_bs_error_budget(*, modes, pairs, driven=None, t2_type="ramsey", titl
         d = df[df["pair"] == pair].reset_index(drop=True)
         for i, r in d.iterrows():
             xi = x[j] + (i - (len(d) - 1) / 2) * width
-            color = f"C{tier_names.index(r['tier'])}"
+            color = colors[tier_names.index(r["tier"])]
             ax.bar(xi, r["loss err"] * 100, width, color=color)
             ax.bar(xi, r["dephasing err"] * 100, width, bottom=r["loss err"] * 100,
-                   color=color, alpha=0.4)
+                   color=light(color))
+    ax.set_xlim(-0.6, len(pair_names) - 0.4)  # keeps bar width sane with few pairs
     ax.set_xticks(x)
-    ax.set_xticklabels(pair_names)
+    ax.set_xticklabels([p.replace("-", "\n") for p in pair_names])  # "Bob-S3" -> two lines
     ax.set_ylabel("Swap infidelity (%)")
     ax.set_title(title)
-    static_label = "static (Ramsey: upper bound)" if t2_type == "ramsey" else "static (echo)"
-    handles = [Patch(color=f"C{i}") for i in range(3)] + [Patch(color="grey", alpha=0.4)]
-    labels = [static_label, "pump on, detuned", "beamsplitter fit", "lighter top = dephasing part"]
-    ax.legend(handles, labels)
+    # legend: only the tiers that actually appear, plus the light-shade key
+    present = [i for i, t in enumerate(tier_names) if t in set(df["tier"])]
+    handles = ([Patch(color=colors[i]) for i in present]
+               + [tuple(Patch(color=colors[i]) for i in present),
+                  tuple(Patch(color=light(colors[i])) for i in present)])
+    labels = [tier_labels[i] for i in present] + [loss_label, dephasing_label]
+    ax.margins(y=0.35)  # headroom so the legend sits above the bars
+    ax.legend(handles, labels, ncols=2, loc="upper left",
+              handler_map={tuple: HandlerTuple(ndivide=None, pad=0)})
+
+    if t2_type == "ramsey":
+        print("Note: static bars use Ramsey T2, so the static dephasing is an upper bound "
+              "(the swap suppresses slow noise that Ramsey picks up).")
 
     return df, fig, ax
