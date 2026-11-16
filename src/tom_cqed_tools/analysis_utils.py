@@ -4487,8 +4487,8 @@ def plot_bs_fidelities(df):
 
 
 def analyze_bs_error_budget(*, modes, pairs, driven=None, t2_type="ramsey", title="",
-                            tier_labels=("Static (mode coherences)", "Pump on, detuned", "Beamsplitter"),
-                            loss_label="Dark: photon loss", dephasing_label="Light: dephasing"):
+                            tier_labels=("Static decoherence", "Pump on, detuned", "Total BS decoherence"),
+                            loss_label="Photon loss", dephasing_label="Dephasing"):
     """
     Beamsplitter error budget for several pairs: static vs drive-induced vs swap-specific.
 
@@ -4545,7 +4545,8 @@ def analyze_bs_error_budget(*, modes, pairs, driven=None, t2_type="ramsey", titl
     # grouped bars: one group per pair, one bar per measured tier (color), bars in a
     # group touch; dark part = loss, light part on top = dephasing.
     # Okabe-Ito colors (colorblind-safe); light = same color blended toward white (opaque)
-    colors = ["#0072B2", "#E69F00", "#009E73"]
+    # blue / reddish purple / orange: well separated from each other
+    colors = ["#0072B2", "#CC79A7", "#E69F00"]
     light = lambda c: tuple(1 - (1 - np.array(to_rgb(c))) * 0.45)
     fig, ax = plt.subplots()
     pair_names = list(pairs)
@@ -4560,18 +4561,30 @@ def analyze_bs_error_budget(*, modes, pairs, driven=None, t2_type="ramsey", titl
             ax.bar(xi, r["dephasing err"] * 100, width, bottom=r["loss err"] * 100,
                    color=light(color))
     ax.set_xlim(-0.6, len(pair_names) - 0.4)  # keeps bar width sane with few pairs
+    # x labels: storage mode under each pair, buffer name once under its group of pairs
+    # (written per pair, "Alice S1  Alice S2 ...", they collide at paper font sizes)
+    buffers = [pairs[p]["modes"][0] for p in pair_names]
     ax.set_xticks(x)
-    ax.set_xticklabels([p.replace("-", "\n") for p in pair_names])  # "Bob-S3" -> two lines
+    ax.set_xticklabels([pairs[p]["modes"][1] for p in pair_names])
+    group_names = list(dict.fromkeys(buffers))  # unique buffers, in order
+    group_centers = [np.mean([xi for xi, b in zip(x, buffers) if b == g]) for g in group_names]
+    ax.set_xticks(group_centers, group_names, minor=True)
+    ax.xaxis.remove_overlapping_locs = False  # else a group label landing on a pair's tick is dropped
+    ax.tick_params(axis="x", which="minor", length=0, pad=1.6 * plt.rcParams["font.size"])
     ax.set_ylabel("Swap infidelity (%)")
     ax.set_title(title)
-    # legend: only the tiers that actually appear, plus the light-shade key
+    # two legend boxes. Left: what each color is (only the tiers that actually appear).
+    # Right: the shading key, which applies to every color (dark = loss, light = dephasing).
     present = [i for i, t in enumerate(tier_names) if t in set(df["tier"])]
-    handles = ([Patch(color=colors[i]) for i in present]
-               + [tuple(Patch(color=colors[i]) for i in present),
-                  tuple(Patch(color=light(colors[i])) for i in present)])
-    labels = [tier_labels[i] for i in present] + [loss_label, dephasing_label]
-    ax.margins(y=0.35)  # headroom so the legend sits above the bars
-    ax.legend(handles, labels, ncols=2, loc="upper left",
+    # fontsize="small" = one step below the axis-label size, whatever font.size is set to
+    ax.margins(y=0.4)  # headroom so the legends sit above the bars
+    color_legend = ax.legend([Patch(color=colors[i]) for i in present],
+                             [tier_labels[i] for i in present], loc="upper left",
+                             fontsize="small")
+    ax.add_artist(color_legend)  # keep this box when the second legend is drawn
+    ax.legend([tuple(Patch(color=colors[i]) for i in present),
+               tuple(Patch(color=light(colors[i])) for i in present)],
+              [loss_label, dephasing_label], loc="upper right", fontsize="small",
               handler_map={tuple: HandlerTuple(ndivide=None, pad=0)})
 
     if t2_type == "ramsey":
